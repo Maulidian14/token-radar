@@ -154,13 +154,17 @@
 
   function renderModel() {
     var m = DATA.model;
-    var tiers = m.size_tiers.map(function (t) {
-      return '<li>' + (t[0] === 0 ? 'under $50M' : 'TVL ≥ ' + fmtUsd(t[0])) + ' → &times;' + t[1] + '</li>';
+    var cal = DATA.calibration;
+    var tiers = cal.bands.map(function (b) {
+      var label = b.min_tvl === 0 ? 'under $50M' : 'TVL ≥ ' + fmtUsd(b.min_tvl);
+      return '<li>' + label + ' → &times;' + b.multiple.toFixed(4) +
+        ' <span class="cal-evidence">(n=' + b.n + ', median ' + b.median.toFixed(4) + (b.pooled ? ', PAVA-pooled' : '') + ')</span></li>';
     }).join('');
     document.getElementById('model-grid').innerHTML =
-      '<div class="model-card"><h3>Size multiple</h3><p>A giant trades at a lower TVL multiple than a small protocol, so the multiple tapers with size:</p><ul>' + tiers + '</ul></div>' +
-      '<div class="model-card"><h3>Growth multiplier</h3><p>1 + clamped 7-day growth &times; ' + m.growth_weight + '. Growth is clamped to ' + m.growth_floor + '% … +' + m.growth_cap + '%, so one wild week cannot dominate the board.</p></div>' +
-      '<div class="model-card"><h3>Age multiplier</h3><p>' + m.age_floor + ' + min(age, ' + m.age_days_cap + ' days) / ' + m.age_days_cap + ' &times; ' + m.age_range + '. A protocol that has run longer with no token scores higher; no listing date counts as ' + m.unknown_age_days + ' days.</p></div>';
+      '<div class="model-card"><h3>Size multiple — calibrated, not asserted</h3><p>Each tier is the median market-cap/TVL of the snapshot\'s own live-token protocols in that TVL band (' + cal.live_count + ' protocols), made monotone by PAVA. No multiple is hardcoded:</p><ul>' + tiers + '</ul>' +
+      '<p class="note">Conservative by design: these are circulating market caps, not fully diluted values, and a launch usually prices above them. No premium is assumed.</p></div>' +
+      '<div class="model-card"><h3>Growth multiplier</h3><p>1 + clamped 7-day growth &times; ' + m.growth_weight + '. Growth is clamped to ' + m.growth_floor + '% … +' + m.growth_cap + '%, so one wild week cannot dominate the board. A conservative prior, kept light: growth barely correlates with market multiples in this snapshot.</p></div>' +
+      '<div class="model-card"><h3>Age multiplier</h3><p>' + m.age_floor + ' + min(age, ' + m.age_days_cap + ' days) / ' + m.age_days_cap + ' &times; ' + m.age_range + '. A protocol that has run longer with no token scores higher; no listing date counts as ' + m.unknown_age_days + ' days. A conservative prior, like growth.</p></div>';
   }
 
   // ------------------------------------------------------------ detail

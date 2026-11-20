@@ -92,6 +92,8 @@ td.name small { display: block; color: var(--muted); font-weight: 400; font-size
 .model-card h3 { margin: 0 0 6px; font-size: 14px; color: var(--accent); }
 .model-card p { margin: 0; font-size: 13px; color: var(--muted); }
 .model-card ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+.model-card ul li { margin-bottom: 2px; }
+.cal-evidence { color: var(--muted); font-size: 12px; }
 
 .foot { color: var(--muted); font-size: 13px; }
 

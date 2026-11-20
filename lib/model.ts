@@ -11,16 +11,30 @@
 // function, impliedValue, that scores every protocol the same way. No protocol
 // name is ever special-cased.
 //
-//   sizeMultiple(tvl)  TVL tiers: a giant's token trades at a lower TVL
-//                      multiple than a small protocol's, so the multiple
-//                      tapers as TVL grows:
-//                        tvl >= $5B    -> 0.12
-//                        tvl >= $1B    -> 0.18
-//                        tvl >= $250M  -> 0.25
-//                        tvl >= $50M   -> 0.32
-//                        tvl <  $50M   -> 0.40
-//   growthMult         1 + clamp(change_7d, -50, 100) / 100 * 0.6
-//                      (no reported growth counts as 0%)
+// The size multiple is SELF-CALIBRATING: calibrateTiers derives it from the
+// snapshot's own live-token protocols at run time, so the tiers are the
+// snapshot's own evidence, not numbers asserted in code. Only the METHOD is
+// hardcoded — the median, the TVL bands, the monotonicity rule, the fallback:
+//   1. Take every protocol that records a token (mcap_usd > 0) and a TVL.
+//   2. Per TVL band, take the MEDIAN of mcap/TVL. The median, not the mean:
+//      a few ratios are extreme (aave-v2 18.96x, rain 400x — DefiLlama
+//      attribution artefacts) and the mean would follow them. A band with
+//      fewer than 3 members falls back to the global median of all ratios.
+//   3. Enforce monotonicity with PAVA (pool adjacent violators, weighted by
+//      band size): a multiple must never rise as TVL grows, so a band whose
+//      median breaks the order is pooled with its neighbour.
+//   On this snapshot the derived tiers are 0.0337 / 0.0337 / 0.0820 / 0.1691 /
+//   0.4187 — the largest protocols' tokens really do trade at a far lower TVL
+//   multiple than a small protocol's. These values are deliberately
+//   conservative: they are circulating market caps, not fully diluted values,
+//   and a launch usually prices above them. No premium factor is assumed.
+//
+//   sizeMultiple(tvl)  the calibrated tier for the protocol's TVL band
+//   growthMult         1 + clamp(change_7d, -50, 100) / 100 * 0.4
+//                      (no reported growth counts as 0%). Growth and age are
+//                      kept as CONSERVATIVE PRIORS, not calibrations: in this
+//                      snapshot neither correlates with mcap/TVL (r = -0.15
+//                      and -0.08), so the growth weight is held low at 0.4.
 //   ageMult            0.70 + min(age_days, 730) / 730 * 0.50
 //                      (no listing date counts as 365 days)
 //   implied            max(1, round(tvl * sizeMultiple * growthMult * ageMult))
@@ -53,8 +67,8 @@ export interface Snapshot {
 
 /** The model's constants, stated in the dashboard's model panel. */
 export interface ModelConstants {
-  /** TVL tiers, largest first: [min TVL in USD, multiple]. */
-  size_tiers: Array<[number, number]>;
+  /** TVL band floors, largest first. The MULTIPLES are never constants: calibrateTiers derives them from the snapshot. */
+  size_bands: number[];
   /** Weight of 7-day growth in the growth multiplier. */
   growth_weight: number;
   /** 7-day growth is clamped to this range before it is applied. */
@@ -66,27 +80,117 @@ export interface ModelConstants {
   age_days_cap: number;
   /** Age in days assumed when the snapshot lists no date. */
   unknown_age_days: number;
+  /** A band needs this many live-token members to calibrate from its own median; fewer falls back to the global median. */
+  calibration_min_band: number;
 }
 
 export const MODEL: ModelConstants = {
-  size_tiers: [
-    [5_000_000_000, 0.12],
-    [1_000_000_000, 0.18],
-    [250_000_000, 0.25],
-    [50_000_000, 0.32],
-    [0, 0.4],
-  ],
-  growth_weight: 0.6,
+  size_bands: [5_000_000_000, 1_000_000_000, 250_000_000, 50_000_000, 0],
+  growth_weight: 0.4,
   growth_floor: -50,
   growth_cap: 100,
   age_floor: 0.7,
   age_range: 0.5,
   age_days_cap: 730,
   unknown_age_days: 365,
+  calibration_min_band: 3,
 };
 
 /** The model's version label, shown in the dashboard. */
-export const MODEL_VERSION = 'launch-radar-1';
+export const MODEL_VERSION = 'launch-radar-2';
+
+/** One derived size tier: its band, the evidence behind it, and the multiple it sets. */
+export interface CalibrationBand {
+  /** TVL floor of the band in USD. */
+  min_tvl: number;
+  /** Live-token protocols in this band. */
+  n: number;
+  /** Median mcap/TVL of the band's members (the global median when n < calibration_min_band). */
+  median: number;
+  /** Whether this band's median was pooled with a neighbour by PAVA. */
+  pooled: boolean;
+  /** The multiple this band sets, after PAVA. */
+  multiple: number;
+}
+
+/** The calibration record calibrateTiers derives from the snapshot, shown in the dashboard's model panel. */
+export interface CalibrationInfo {
+  /** Live-token protocols the calibration read. */
+  live_count: number;
+  /** Median mcap/TVL across all of them. */
+  global_median: number;
+  /** One entry per TVL band, largest first. */
+  bands: CalibrationBand[];
+  /** The derived tiers as [min TVL, multiple] pairs, for sizeMultiple. */
+  tiers: Array<[number, number]>;
+}
+
+/** The median of a sorted-or-not list of numbers; null when empty. */
+function medianOf(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * Derive the size tiers from the snapshot's own live-token protocols.
+ * Per TVL band, the median of mcap/TVL; a band with too few members takes the
+ * global median; then PAVA (pool adjacent violators, weighted by band size)
+ * enforces that a multiple never rises as TVL grows. Only the method is
+ * hardcoded — every number comes from the snapshot. Deterministic: medians and
+ * PAVA are pure functions of the snapshot's bytes.
+ */
+export function calibrateTiers(snapshot: Snapshot, model: ModelConstants = MODEL): CalibrationInfo {
+  const live = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  const allRatios = live.map((p) => p.mcap_usd! / p.tvl_usd);
+  const globalMedian = medianOf(allRatios) ?? 0;
+  const bands = model.size_bands;
+  const raw: Array<{ min_tvl: number; n: number; median: number }> = bands.map((minTvl, i) => {
+    const hi = i === 0 ? Infinity : bands[i - 1]!;
+    const ratios = live.filter((p) => p.tvl_usd >= minTvl && p.tvl_usd < hi).map((p) => p.mcap_usd! / p.tvl_usd);
+    const med = medianOf(ratios);
+    return { min_tvl: minTvl, n: ratios.length, median: med !== null && ratios.length >= model.calibration_min_band ? med : globalMedian };
+  });
+  // PAVA, largest band first: multiples must not rise as TVL grows, so the
+  // sequence down the bands must be non-decreasing; pool adjacent violators
+  // with n-weighted averages until it is.
+  const blocks: Array<{ sum: number; n: number; at: number[] }> = [];
+  raw.forEach((r, i) => {
+    blocks.push({ sum: r.median * Math.max(r.n, 1), n: Math.max(r.n, 1), at: [i] });
+    while (blocks.length >= 2) {
+      const a = blocks[blocks.length - 2]!;
+      const b = blocks[blocks.length - 1]!;
+      if (a.sum / a.n <= b.sum / b.n) break;
+      blocks.pop();
+      blocks.pop();
+      blocks.push({ sum: a.sum + b.sum, n: a.n + b.n, at: [...a.at, ...b.at] });
+    }
+  });
+  const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
+  const multiples = new Array<number>(raw.length).fill(0);
+  const pooled = new Array<boolean>(raw.length).fill(false);
+  for (const block of blocks) {
+    const v = round4(block.sum / block.n);
+    for (const i of block.at) {
+      multiples[i] = v;
+      pooled[i] = block.at.length > 1;
+    }
+  }
+  const calBands: CalibrationBand[] = raw.map((r, i) => ({
+    min_tvl: r.min_tvl,
+    n: r.n,
+    median: round4(r.median),
+    pooled: pooled[i]!,
+    multiple: multiples[i]!,
+  }));
+  return {
+    live_count: live.length,
+    global_median: round4(globalMedian),
+    bands: calBands,
+    tiers: calBands.map((b) => [b.min_tvl, b.multiple] as [number, number]),
+  };
+}
 
 /** How many live-token protocols the Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -102,22 +206,23 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The TVL multiple for one protocol's size, from the model's tiers. */
-export function sizeMultiple(tvlUsd: number, model: ModelConstants): number {
-  for (const [minTvl, multiple] of model.size_tiers) {
+/** The TVL multiple for one protocol's size, from the tiers calibrateTiers derived. */
+export function sizeMultiple(tvlUsd: number, tiers: Array<[number, number]>): number {
+  for (const [minTvl, multiple] of tiers) {
     if (tvlUsd >= minTvl) return multiple;
   }
-  return model.size_tiers[model.size_tiers.length - 1]![1];
+  return tiers[tiers.length - 1]![1];
 }
 
-/** The three multipliers and the implied value one protocol gets under `model`. */
+/** The three multipliers and the implied value one protocol gets under `model` and the calibrated `tiers`. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
+  tiers: Array<[number, number]>,
 ): { implied: number; sizeMult: number; growthPct: number; growthMult: number; ageMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const sizeMult = sizeMultiple(protocol.tvl_usd, model);
+  const sizeMult = sizeMultiple(protocol.tvl_usd, tiers);
   const rawGrowth = typeof protocol.change_7d === 'number' && Number.isFinite(protocol.change_7d) ? protocol.change_7d : 0;
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -215,6 +320,8 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  /** The calibration record: the derived tiers and the evidence behind each. */
+  calibration: CalibrationInfo;
   watchlist_size: number;
   board_size: number;
   live_size: number;
@@ -233,7 +340,8 @@ export class SnapshotError extends Error {
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
 /** The ranked board: every rankable protocol, most valuable first, ranks 1..N. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, calibration?: CalibrationInfo): BoardRow[] {
+  const tiers = (calibration ?? calibrateTiers(snapshot, model)).tiers;
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const watchlist = new Set(snapshot.watchlist);
   // The watchlist is the floor: every slug on it is ranked. The rest of the
@@ -242,7 +350,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   const missing = snapshot.watchlist.filter((s) => !index.has(s));
   if (missing.length > 0) throw new SnapshotError(`watchlist slugs missing from protocols: ${missing.slice(0, 5).join(', ')}`);
   const scored = chosen.map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model);
+    const v = impliedValue(p, snapshot.as_of, model, tiers);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -299,7 +407,67 @@ function gasUsd(chain: string): number {
   return table[chain] ?? 2;
 }
 
-/** How much capital one farm position takes, from the protocol's own TVL. */
+/** How to get funds onto a chain, in words specific to that chain's own bridge routes. */
+function bridgeFor(capital: number, chain: string): string {
+  switch (chain) {
+    case 'Ethereum':
+      return `Send $${capital} of USDC to the farm wallet on Ethereum — no bridge needed, the farm runs on mainnet.`;
+    case 'Solana':
+      return `Bridge $${capital} of USDC to Solana with Wormhole or Allbridge, and take native USDC, not a wrapped copy.`;
+    case 'Base':
+    case 'Arbitrum':
+    case 'Optimism':
+      return `Bridge $${capital} of USDC to ${chain} from Ethereum mainnet with the chain's official bridge.`;
+    case 'Polygon':
+      return `Bridge $${capital} of USDC to Polygon from Ethereum with the Polygon PoS bridge.`;
+    case 'Avalanche':
+      return `Bridge $${capital} of USDC to Avalanche with the Avalanche Bridge (Core) or another canonical route.`;
+    case 'Binance':
+      return `Bridge $${capital} of USDC to BNB Chain with the official BNB bridge or Celer.`;
+    case 'Tron':
+      return `Move $${capital} of USDT onto Tron with a Tron-supported bridge, or send it natively from an exchange.`;
+    case 'Bitcoin':
+      return `Move $${capital} to a Bitcoin-side wallet the protocol supports, following its own documented route.`;
+    default:
+      return `Bridge $${capital} of USDC to ${chain} with the bridge the protocol documents for this chain.`;
+  }
+}
+
+/** The weekly action that keeps a wallet active, specific to the protocol's category. */
+function weeklyFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) {
+    return `repay a small part of a borrow or top up the supply by $5 to $10`;
+  }
+  if (c.includes('dex')) {
+    return `swap $5 to $10 through the pool, or add a little more liquidity`;
+  }
+  if (c.includes('yield') || c.includes('leveraged farm') || c.includes('curator') || c.includes('allocator')) {
+    return `deposit another $5 to $10 into the vault, or claim and restake its rewards`;
+  }
+  if (c.includes('derivative') || c.includes('perpetual') || c.includes('options')) {
+    return `open and close one small position`;
+  }
+  if (c.includes('rwa')) {
+    return `check the asset's yield accrual and add $5 to $10 while the window is open`;
+  }
+  if (c.includes('staking') || c.includes('restak')) {
+    return `restake any rewards the position pays out`;
+  }
+  if (c.includes('prediction')) {
+    return `place one small position on a new market`;
+  }
+  if (c.includes('insurance')) {
+    return `check the policy's status and renew cover before it lapses`;
+  }
+  if (c.includes('payment') || c.includes('card')) {
+    return `route one small real payment through it`;
+  }
+  if (c.includes('basis')) {
+    return `check the funding rate and rebalance if it has flipped`;
+  }
+  return `make one small deposit or swap on it`;
+}
 function capitalFor(p: SnapshotProtocol): number {
   if (p.tvl_usd >= 1_000_000_000) return 250;
   if (p.tvl_usd >= 100_000_000) return 150;
@@ -367,9 +535,9 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
   const gas = gasUsd(chain);
   const steps = [
     `Set up a fresh wallet just for this farm and store its seed phrase offline on paper. Cost: $0 to create the wallet. Time: 5 minutes.`,
-    `Bridge $${capital} of USDC to ${chain} for the farm. Cost: about $${gas} in bridge and gas fees. Time: about 10 minutes.`,
+    `${bridgeFor(capital, chain)} Cost: about $${gas} in bridge and gas fees. Time: about 10 minutes.`,
     `${actionFor(p, capital, chain)} Cost: $${capital} of capital and about $${gas} of gas. Time: 15 minutes to set up.`,
-    `Do one qualifying action each week — a deposit, a swap, a borrow or a vote — so the wallet stays active across snapshots. Cost: about $${gas} of gas a week. Time: 10 minutes a week.`,
+    `Each week, ${weeklyFor(p)} so the wallet stays active across snapshots. Cost: about $${gas} of gas a week. Time: 10 minutes a week.`,
     `Keep the position open for at least ${hold} days; airdrop snapshots usually reward wallets active across several months. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
     `When a token is announced, claim only from the link the protocol publishes on its own site or X account — never from DMs or ads. Cost: gas for the claim only. Time: 15 minutes.`,
   ];
@@ -422,7 +590,8 @@ export function radarRow(row: BoardRow): RadarRow {
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+  const calibration = calibrateTiers(snapshot, model);
+  const board = buildBoard(snapshot, model, calibration);
   const live = liveRows(snapshot);
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -430,6 +599,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    calibration,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     live_size: live.length,

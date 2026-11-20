@@ -61,7 +61,7 @@
 
   <section class="panel" id="model" aria-label="The value model">
     <h2>How implied value is scored</h2>
-    <p>One function scores every protocol from the snapshot's own figures — TVL, 7-day growth, and how long it has run with no token. No protocol name is special-cased.</p>
+    <p>One function scores every protocol from the snapshot's own figures — TVL, 7-day growth, and how long it has run with no token. No protocol name is special-cased. The size tiers are calibrated from the snapshot's own live-token protocols at run time — median market-cap/TVL per TVL band, made monotone — so the model follows the snapshot's own evidence, not numbers asserted in code.</p>
     <p class="formula">implied = TVL &times; size multiple &times; growth multiplier &times; age multiplier</p>
     <div class="model-grid" id="model-grid"></div>
     <p class="note">An estimate, not a price. It says what a launch would be worth if the protocol's record stayed as it is; it does not predict whether or when a token is issued.</p>
