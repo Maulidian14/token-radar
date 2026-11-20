@@ -11,30 +11,37 @@
 // function, impliedValue, that scores every protocol the same way. No protocol
 // name is ever special-cased.
 //
-// The size multiple is SELF-CALIBRATING: calibrateTiers derives it from the
-// snapshot's own live-token protocols at run time, so the tiers are the
+// The size multiple is SELF-CALIBRATING: calibratePowerLaw fits it from the
+// snapshot's own live-token protocols at run time, so the size curve is the
 // snapshot's own evidence, not numbers asserted in code. Only the METHOD is
-// hardcoded — the median, the TVL bands, the monotonicity rule, the fallback:
+// hardcoded — the fit, the folds, the fallback:
 //   1. Take every protocol that records a token (mcap_usd > 0) and a TVL.
-//   2. Per TVL band, take the MEDIAN of mcap/TVL. The median, not the mean:
-//      a few ratios are extreme (aave-v2 18.96x, rain 400x — DefiLlama
-//      attribution artefacts) and the mean would follow them. A band with
-//      fewer than 3 members falls back to the global median of all ratios.
-//   3. Enforce monotonicity with PAVA (pool adjacent violators, weighted by
-//      band size): a multiple must never rise as TVL grows, so a band whose
-//      median breaks the order is pooled with its neighbour.
-//   On this snapshot the derived tiers are 0.0337 / 0.0337 / 0.0820 / 0.1691 /
-//   0.4187 — the largest protocols' tokens really do trade at a far lower TVL
-//   multiple than a small protocol's. These values are deliberately
-//   conservative: they are circulating market caps, not fully diluted values,
-//   and a launch usually prices above them. No premium factor is assumed.
+//   2. Fit a power law, log10(mcap) = intercept + slope * log10(TVL), by
+//      Theil-Sen: the slope is the MEDIAN of all pairwise slopes and the
+//      intercept the median residual. The median, not least squares: a few
+//      ratios are extreme (aave-v2 18.96x, rain 400x — DefiLlama attribution
+//      artefacts) and least squares would follow them. The fit is smooth, so
+//      a protocol's multiple falls gradually as it grows — no band edge where
+//      a 1% TVL difference doubles the implied value.
+//   3. Backtest the fit by 5-fold cross-validation over the same live-token
+//      protocols (deterministic folds, by slug): fit on four folds, predict
+//      the fifth, and report the median factor error, the share predicted
+//      within 2x, and the rank correlation. The numbers in the dashboard's
+//      model panel are that backtest, computed from this snapshot at run time.
+//   On this snapshot the fit is log10(mcap) = 2.7837 + 0.5554 * log10(TVL):
+//   market cap grows with the square root of TVL, so the largest protocols'
+//   tokens really do trade at a far lower TVL multiple than a small
+//   protocol's. These values are deliberately conservative: they are
+//   circulating market caps, not fully diluted values, and a launch usually
+//   prices above them. No premium factor is assumed.
 //
-//   sizeMultiple(tvl)  the calibrated tier for the protocol's TVL band
+//   sizeMultiple(tvl)  the fitted power law's effective multiple at this TVL:
+//                      10^intercept * tvl^(slope - 1)
 //   growthMult         1 + clamp(change_7d, -50, 100) / 100 * 0.4
 //                      (no reported growth counts as 0%). Growth and age are
 //                      kept as CONSERVATIVE PRIORS, not calibrations: in this
 //                      snapshot neither correlates with mcap/TVL (r = -0.15
-//                      and -0.08), so the growth weight is held low at 0.4.
+//                      and +0.01), so the growth weight is held low at 0.4.
 //   ageMult            0.70 + min(age_days, 730) / 730 * 0.50
 //                      (no listing date counts as 365 days)
 //   implied            max(1, round(tvl * sizeMultiple * growthMult * ageMult))
@@ -67,8 +74,6 @@ export interface Snapshot {
 
 /** The model's constants, stated in the dashboard's model panel. */
 export interface ModelConstants {
-  /** TVL band floors, largest first. The MULTIPLES are never constants: calibrateTiers derives them from the snapshot. */
-  size_bands: number[];
   /** Weight of 7-day growth in the growth multiplier. */
   growth_weight: number;
   /** 7-day growth is clamped to this range before it is applied. */
@@ -80,12 +85,11 @@ export interface ModelConstants {
   age_days_cap: number;
   /** Age in days assumed when the snapshot lists no date. */
   unknown_age_days: number;
-  /** A band needs this many live-token members to calibrate from its own median; fewer falls back to the global median. */
-  calibration_min_band: number;
+  /** Folds in the backtest cross-validation. */
+  cv_folds: number;
 }
 
 export const MODEL: ModelConstants = {
-  size_bands: [5_000_000_000, 1_000_000_000, 250_000_000, 50_000_000, 0],
   growth_weight: 0.4,
   growth_floor: -50,
   growth_cap: 100,
@@ -93,36 +97,42 @@ export const MODEL: ModelConstants = {
   age_range: 0.5,
   age_days_cap: 730,
   unknown_age_days: 365,
-  calibration_min_band: 3,
+  cv_folds: 5,
 };
 
 /** The model's version label, shown in the dashboard. */
-export const MODEL_VERSION = 'launch-radar-2';
+export const MODEL_VERSION = 'launch-radar-3';
 
-/** One derived size tier: its band, the evidence behind it, and the multiple it sets. */
-export interface CalibrationBand {
-  /** TVL floor of the band in USD. */
-  min_tvl: number;
-  /** Live-token protocols in this band. */
-  n: number;
-  /** Median mcap/TVL of the band's members (the global median when n < calibration_min_band). */
-  median: number;
-  /** Whether this band's median was pooled with a neighbour by PAVA. */
-  pooled: boolean;
-  /** The multiple this band sets, after PAVA. */
-  multiple: number;
+/** The fitted power law: log10(mcap) = intercept + slope * log10(TVL). */
+export interface PowerLawFit {
+  /** log10(mcap) when log10(TVL) is 0. */
+  intercept: number;
+  /** How fast log10(mcap) grows with log10(TVL). */
+  slope: number;
 }
 
-/** The calibration record calibrateTiers derives from the snapshot, shown in the dashboard's model panel. */
+/** The backtest record: 5-fold cross-validation of the power-law fit over the live-token protocols. */
+export interface BacktestInfo {
+  /** Live-token protocols the backtest predicted. */
+  n: number;
+  /** Median factor error: the median prediction is within this multiple of the true market cap. */
+  median_factor: number;
+  /** Share of predictions within 2x of the true market cap. */
+  within_2x: number;
+  /** Spearman rank correlation between predicted and true market cap. */
+  spearman: number;
+}
+
+/** The calibration record calibratePowerLaw derives from the snapshot, shown in the dashboard's model panel. */
 export interface CalibrationInfo {
   /** Live-token protocols the calibration read. */
   live_count: number;
   /** Median mcap/TVL across all of them. */
   global_median: number;
-  /** One entry per TVL band, largest first. */
-  bands: CalibrationBand[];
-  /** The derived tiers as [min TVL, multiple] pairs, for sizeMultiple. */
-  tiers: Array<[number, number]>;
+  /** The fitted power law, rounded to 4 decimals — the fit the model uses. */
+  fit: PowerLawFit;
+  /** The cross-validation backtest of that fit. */
+  backtest: BacktestInfo;
 }
 
 /** The median of a sorted-or-not list of numbers; null when empty. */
@@ -133,62 +143,118 @@ function medianOf(values: number[]): number | null {
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
+const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
+
+/** One live-token protocol as a point in log space: log10(TVL) against log10(market cap). */
+interface LogPoint {
+  x: number;
+  y: number;
+}
+
 /**
- * Derive the size tiers from the snapshot's own live-token protocols.
- * Per TVL band, the median of mcap/TVL; a band with too few members takes the
- * global median; then PAVA (pool adjacent violators, weighted by band size)
- * enforces that a multiple never rises as TVL grows. Only the method is
- * hardcoded — every number comes from the snapshot. Deterministic: medians and
- * PAVA are pure functions of the snapshot's bytes.
+ * The Theil-Sen fit of y on x: the slope is the median of every pairwise slope,
+ * the intercept the median of y - slope * x. A median fit, so the few extreme
+ * attribution artefacts in the snapshot cannot pull the line. Deterministic:
+ * medians of exact float arrays, in slug order.
  */
-export function calibrateTiers(snapshot: Snapshot, model: ModelConstants = MODEL): CalibrationInfo {
-  const live = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
-  const allRatios = live.map((p) => p.mcap_usd! / p.tvl_usd);
-  const globalMedian = medianOf(allRatios) ?? 0;
-  const bands = model.size_bands;
-  const raw: Array<{ min_tvl: number; n: number; median: number }> = bands.map((minTvl, i) => {
-    const hi = i === 0 ? Infinity : bands[i - 1]!;
-    const ratios = live.filter((p) => p.tvl_usd >= minTvl && p.tvl_usd < hi).map((p) => p.mcap_usd! / p.tvl_usd);
-    const med = medianOf(ratios);
-    return { min_tvl: minTvl, n: ratios.length, median: med !== null && ratios.length >= model.calibration_min_band ? med : globalMedian };
-  });
-  // PAVA, largest band first: multiples must not rise as TVL grows, so the
-  // sequence down the bands must be non-decreasing; pool adjacent violators
-  // with n-weighted averages until it is.
-  const blocks: Array<{ sum: number; n: number; at: number[] }> = [];
-  raw.forEach((r, i) => {
-    blocks.push({ sum: r.median * Math.max(r.n, 1), n: Math.max(r.n, 1), at: [i] });
-    while (blocks.length >= 2) {
-      const a = blocks[blocks.length - 2]!;
-      const b = blocks[blocks.length - 1]!;
-      if (a.sum / a.n <= b.sum / b.n) break;
-      blocks.pop();
-      blocks.pop();
-      blocks.push({ sum: a.sum + b.sum, n: a.n + b.n, at: [...a.at, ...b.at] });
-    }
-  });
-  const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
-  const multiples = new Array<number>(raw.length).fill(0);
-  const pooled = new Array<boolean>(raw.length).fill(false);
-  for (const block of blocks) {
-    const v = round4(block.sum / block.n);
-    for (const i of block.at) {
-      multiples[i] = v;
-      pooled[i] = block.at.length > 1;
+function theilSen(points: LogPoint[]): PowerLawFit {
+  const slopes: number[] = [];
+  for (let i = 0; i < points.length; i++) {
+    for (let j = i + 1; j < points.length; j++) {
+      const dx = points[j]!.x - points[i]!.x;
+      if (dx !== 0) slopes.push((points[j]!.y - points[i]!.y) / dx);
     }
   }
-  const calBands: CalibrationBand[] = raw.map((r, i) => ({
-    min_tvl: r.min_tvl,
-    n: r.n,
-    median: round4(r.median),
-    pooled: pooled[i]!,
-    multiple: multiples[i]!,
-  }));
+  const slope = medianOf(slopes) ?? 1;
+  const intercept = medianOf(points.map((p) => p.y - slope * p.x)) ?? 0;
+  return { intercept: round4(intercept), slope: round4(slope) };
+}
+
+/** Pearson correlation of two equal-length lists; 0 when either has no variance. */
+function pearson(u: number[], v: number[]): number {
+  const n = u.length;
+  if (n === 0) return 0;
+  const mu = u.reduce((s, x) => s + x, 0) / n;
+  const mv = v.reduce((s, x) => s + x, 0) / n;
+  let num = 0;
+  let du = 0;
+  let dv = 0;
+  for (let i = 0; i < n; i++) {
+    num += (u[i]! - mu) * (v[i]! - mv);
+    du += (u[i]! - mu) ** 2;
+    dv += (v[i]! - mv) ** 2;
+  }
+  return du === 0 || dv === 0 ? 0 : num / Math.sqrt(du * dv);
+}
+
+/** Ranks with ties averaged, 1-based. */
+function ranksOf(values: number[]): number[] {
+  const order = values.map((_, i) => i).sort((a, b) => values[a]! - values[b]!);
+  const ranks = new Array<number>(values.length).fill(0);
+  let i = 0;
+  while (i < order.length) {
+    let j = i;
+    while (j + 1 < order.length && values[order[j + 1]!] === values[order[i]!]) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) ranks[order[k]!] = avg;
+    i = j + 1;
+  }
+  return ranks;
+}
+
+/** Spearman rank correlation between predicted and true market caps. */
+function spearman(predicted: number[], actual: number[]): number {
+  return pearson(ranksOf(predicted), ranksOf(actual));
+}
+
+/**
+ * Derive the size curve from the snapshot's own live-token protocols and
+ * backtest it by cross-validation. The fit is a Theil-Sen power law on
+ * (log10 TVL, log10 mcap); the backtest fits the same line on four folds and
+ * predicts the fifth, over deterministic folds by slug, and reports the median
+ * factor error, the share within 2x, and the rank correlation. Only the method
+ * is hardcoded — every number comes from the snapshot. Deterministic: medians
+ * and folds are pure functions of the snapshot's bytes.
+ */
+export function calibratePowerLaw(snapshot: Snapshot, model: ModelConstants = MODEL): CalibrationInfo {
+  const live = snapshot.protocols
+    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const allRatios = live.map((p) => p.mcap_usd! / p.tvl_usd);
+  const globalMedian = medianOf(allRatios) ?? 0;
+  const points: LogPoint[] = live.map((p) => ({ x: Math.log10(p.tvl_usd), y: Math.log10(p.mcap_usd!) }));
+  // Degenerate fallback, never taken on this snapshot: with fewer than two
+  // live protocols no line can be fitted, so the multiple is the global median.
+  const fit = points.length >= 2 ? theilSen(points) : { intercept: round4(Math.log10(Math.max(globalMedian, 1e-12))), slope: 1 };
+  // 5-fold cross-validation of the same fit: deterministic folds by slug order.
+  const folds = Math.max(2, Math.floor(model.cv_folds));
+  const errors: number[] = [];
+  const predicted: number[] = [];
+  const actual: number[] = [];
+  for (let k = 0; k < folds; k++) {
+    const test = points.filter((_, i) => i % folds === k);
+    const train = points.filter((_, i) => i % folds !== k);
+    if (test.length === 0 || train.length < 2) continue;
+    const f = theilSen(train);
+    for (const p of test) {
+      const pred = 10 ** (f.intercept + f.slope * p.x);
+      errors.push(Math.abs(Math.log10(pred) - p.y));
+      predicted.push(pred);
+      actual.push(10 ** p.y);
+    }
+  }
+  const medianLogErr = medianOf(errors) ?? 0;
+  const within2x = errors.length === 0 ? 0 : errors.filter((e) => e <= Math.log10(2)).length / errors.length;
   return {
     live_count: live.length,
     global_median: round4(globalMedian),
-    bands: calBands,
-    tiers: calBands.map((b) => [b.min_tvl, b.multiple] as [number, number]),
+    fit,
+    backtest: {
+      n: errors.length,
+      median_factor: round4(10 ** medianLogErr),
+      within_2x: round4(within2x),
+      spearman: round4(spearman(predicted, actual)),
+    },
   };
 }
 
@@ -206,23 +272,20 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The TVL multiple for one protocol's size, from the tiers calibrateTiers derived. */
-export function sizeMultiple(tvlUsd: number, tiers: Array<[number, number]>): number {
-  for (const [minTvl, multiple] of tiers) {
-    if (tvlUsd >= minTvl) return multiple;
-  }
-  return tiers[tiers.length - 1]![1];
+/** The TVL multiple for one protocol's size, from the fitted power law: 10^intercept * tvl^(slope - 1). Smooth in TVL, so no band edge doubles a value. Rounded to 4 decimals, so the dashboard's breakdown and the model agree exactly. */
+export function sizeMultiple(tvlUsd: number, fit: PowerLawFit): number {
+  return round4(10 ** fit.intercept * tvlUsd ** (fit.slope - 1));
 }
 
-/** The three multipliers and the implied value one protocol gets under `model` and the calibrated `tiers`. */
+/** The three multipliers and the implied value one protocol gets under `model` and the calibrated `fit`. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
-  tiers: Array<[number, number]>,
+  fit: PowerLawFit,
 ): { implied: number; sizeMult: number; growthPct: number; growthMult: number; ageMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const sizeMult = sizeMultiple(protocol.tvl_usd, tiers);
+  const sizeMult = sizeMultiple(protocol.tvl_usd, fit);
   const rawGrowth = typeof protocol.change_7d === 'number' && Number.isFinite(protocol.change_7d) ? protocol.change_7d : 0;
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -320,7 +383,7 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
-  /** The calibration record: the derived tiers and the evidence behind each. */
+  /** The calibration record: the fitted power law and its backtest. */
   calibration: CalibrationInfo;
   watchlist_size: number;
   board_size: number;
@@ -337,11 +400,9 @@ export class SnapshotError extends Error {
   }
 }
 
-const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
-
 /** The ranked board: every rankable protocol, most valuable first, ranks 1..N. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, calibration?: CalibrationInfo): BoardRow[] {
-  const tiers = (calibration ?? calibrateTiers(snapshot, model)).tiers;
+  const fit = (calibration ?? calibratePowerLaw(snapshot, model)).fit;
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const watchlist = new Set(snapshot.watchlist);
   // The watchlist is the floor: every slug on it is ranked. The rest of the
@@ -350,7 +411,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, ca
   const missing = snapshot.watchlist.filter((s) => !index.has(s));
   if (missing.length > 0) throw new SnapshotError(`watchlist slugs missing from protocols: ${missing.slice(0, 5).join(', ')}`);
   const scored = chosen.map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model, tiers);
+    const v = impliedValue(p, snapshot.as_of, model, fit);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -590,7 +651,7 @@ export function radarRow(row: BoardRow): RadarRow {
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const calibration = calibrateTiers(snapshot, model);
+  const calibration = calibratePowerLaw(snapshot, model);
   const board = buildBoard(snapshot, model, calibration);
   const live = liveRows(snapshot);
   const radar: RadarData = {

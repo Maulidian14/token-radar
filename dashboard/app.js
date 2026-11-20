@@ -155,14 +155,19 @@
   function renderModel() {
     var m = DATA.model;
     var cal = DATA.calibration;
-    var tiers = cal.bands.map(function (b) {
-      var label = b.min_tvl === 0 ? 'under $50M' : 'TVL ≥ ' + fmtUsd(b.min_tvl);
-      return '<li>' + label + ' → &times;' + b.multiple.toFixed(4) +
-        ' <span class="cal-evidence">(n=' + b.n + ', median ' + b.median.toFixed(4) + (b.pooled ? ', PAVA-pooled' : '') + ')</span></li>';
+    var fit = cal.fit;
+    var bt = cal.backtest;
+    // The effective multiple the fitted power law sets at a few TVLs, so the
+    // reader can see the curve fall smoothly instead of stepping at band edges.
+    var refs = [5000000000, 1000000000, 250000000, 50000000, 5000000];
+    var curve = refs.map(function (tvl) {
+      var mult = Math.pow(10, fit.intercept) * Math.pow(tvl, fit.slope - 1);
+      return '<li>TVL ' + fmtUsd(tvl) + ' → &times;' + mult.toFixed(4) + '</li>';
     }).join('');
     document.getElementById('model-grid').innerHTML =
-      '<div class="model-card"><h3>Size multiple — calibrated, not asserted</h3><p>Each tier is the median market-cap/TVL of the snapshot\'s own live-token protocols in that TVL band (' + cal.live_count + ' protocols), made monotone by PAVA. No multiple is hardcoded:</p><ul>' + tiers + '</ul>' +
+      '<div class="model-card"><h3>Size curve — fitted, not asserted</h3><p>Market cap grows with the square root of TVL across the snapshot\'s own ' + cal.live_count + ' live-token protocols. The line is fitted by Theil-Sen — the median of every pairwise slope, so the few extreme attribution artefacts cannot pull it:</p><p class="formula">log10(mcap) = ' + fit.intercept.toFixed(4) + ' + ' + fit.slope.toFixed(4) + ' &times; log10(TVL)</p><ul>' + curve + '</ul>' +
       '<p class="note">Conservative by design: these are circulating market caps, not fully diluted values, and a launch usually prices above them. No premium is assumed.</p></div>' +
+      '<div class="model-card"><h3>Backtest — 5-fold cross-validation</h3><p>The same fit, tested on the ' + bt.n + ' live-token protocols it did not train on: the median prediction lands within &times;' + bt.median_factor.toFixed(2) + ' of the true market cap, ' + Math.round(bt.within_2x * 100) + '% land within 2&times;, and the rank correlation is ' + bt.spearman.toFixed(3) + '. Market caps vary widely around any TVL line — the backtest says by how much, instead of hiding it.</p></div>' +
       '<div class="model-card"><h3>Growth multiplier</h3><p>1 + clamped 7-day growth &times; ' + m.growth_weight + '. Growth is clamped to ' + m.growth_floor + '% … +' + m.growth_cap + '%, so one wild week cannot dominate the board. A conservative prior, kept light: growth barely correlates with market multiples in this snapshot.</p></div>' +
       '<div class="model-card"><h3>Age multiplier</h3><p>' + m.age_floor + ' + min(age, ' + m.age_days_cap + ' days) / ' + m.age_days_cap + ' &times; ' + m.age_range + '. A protocol that has run longer with no token scores higher; no listing date counts as ' + m.unknown_age_days + ' days. A conservative prior, like growth.</p></div>';
   }

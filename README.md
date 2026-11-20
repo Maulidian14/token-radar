@@ -11,28 +11,34 @@ One function, `impliedValue` in `lib/model.ts`, scores every protocol from
 the snapshot's own figures — TVL, 7-day TVL growth, and how long it has run
 with no token. No protocol name is special-cased.
 
-The size multiple is self-calibrating: `calibrateTiers` derives it from the
-snapshot's own live-token protocols at run time. Per TVL band it takes the
-median of market-cap/TVL (the median, not the mean — a few ratios are
-extreme attribution artefacts), falls back to the global median for bands
-with fewer than 3 members, and enforces monotonicity with PAVA (pool
-adjacent violators, weighted by band size) so a multiple never rises as
-TVL grows. Only the method is hardcoded; every number comes from the
-snapshot. The derived tiers are conservative — circulating market caps,
-not fully diluted values — and no premium factor is assumed. Growth and
-age are kept as conservative priors (weight 0.4), not calibrations: neither
+The size multiple is self-calibrating: `calibratePowerLaw` fits it from the
+snapshot's own live-token protocols at run time. Market cap grows with the
+square root of TVL, so the fit is a power law, log10(mcap) = intercept +
+slope * log10(TVL), fitted by Theil-Sen — the slope is the median of every
+pairwise slope and the intercept the median residual, so the few extreme
+ratios (aave-v2 18.96x, rain 400x — DefiLlama attribution artefacts) cannot
+pull the line. The fit is smooth: a protocol's multiple falls gradually as
+it grows, with no band edge where a 1% TVL difference doubles the implied
+value. The same fit is backtested by 5-fold cross-validation over the
+live-token protocols (deterministic folds, by slug), and the dashboard's
+model panel reports the median factor error, the share within 2x, and the
+rank correlation. Only the method is hardcoded; every number comes from the
+snapshot. The derived fit is conservative — circulating market caps, not
+fully diluted values — and no premium factor is assumed. Growth and age are
+kept as conservative priors (weight 0.4), not calibrations: neither
 correlates with market multiples in this snapshot.
 
 ```
-sizeMultiple(tvl)  calibrated tier for the protocol's TVL band
-                     (this snapshot: >= $5B -> 0.0337, >= $1B -> 0.0337,
-                     >= $250M -> 0.0820, >= $50M -> 0.1691, under $50M -> 0.4187)
+sizeMultiple(tvl)  fitted power law's effective multiple at this TVL:
+                     10^intercept * tvl^(slope - 1)
+                     (this snapshot: log10(mcap) = 2.7837 + 0.5554 * log10(TVL);
+                     the multiple falls smoothly from x0.64 at $5M TVL to x0.03 at $5B)
 growthMult         1 + clamp(change_7d, -50, 100) / 100 * 0.4
 ageMult            0.70 + min(age_days, 730) / 730 * 0.50
 implied            max(1, round(tvl * sizeMultiple * growthMult * ageMult))
 ```
 
-Model version: `launch-radar-2`.
+Model version: `launch-radar-3`.
 
 A protocol is pre-token when the snapshot records no market cap, no
 CoinGecko id and no symbol for it. Wrapped, staked and bridged products of
