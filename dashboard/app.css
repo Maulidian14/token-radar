@@ -82,6 +82,17 @@ td.name small { display: block; color: var(--muted); font-weight: 400; font-size
   border: 1px solid var(--teal); color: var(--teal); border-radius: 999px; padding: 2px 8px;
 }
 .badge.watch { border-color: var(--accent); color: var(--accent); margin-left: 6px; }
+.badge.deriv { border-color: var(--muted); color: var(--muted); margin-left: 6px; }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.kpi h3 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.kpi-big { font-size: 26px; font-weight: 800; color: var(--accent); margin: 0 0 4px; }
+.kpi-big span { font-size: 14px; font-weight: 400; color: var(--muted); }
+.movers { margin: 0 0 6px; padding-left: 18px; }
+.movers li { margin-bottom: 4px; }
+.movers a { color: var(--text); font-weight: 600; text-decoration: none; }
+.movers a:hover { color: var(--accent); text-decoration: underline; }
+.adj-list { columns: 2; column-gap: 20px; }
 
 .formula {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;

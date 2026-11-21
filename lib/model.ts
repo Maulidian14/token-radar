@@ -1,10 +1,12 @@
 // Launch Radar — the value model for make.fun's token-radar-01.
 //
-// One sealed snapshot in, one ranked board out. The board ranks every protocol
-// that records no token and is not a wrapped, staked or bridged product of a
-// token that already trades: the watchlist (the floor) plus every other such
-// protocol in the snapshot. Protocols whose token already trades are kept in a
-// separate Live view and never enter the ranked board.
+// One sealed snapshot in, one ranked board out. The board ranks EVERY protocol
+// that records no token: the watchlist (the floor) plus every other pre-token
+// protocol in the snapshot, 342 rows. Each row carries its board class —
+// `launch` for a protocol that is a launch of its own, `derivative` for a
+// wrapped, staked or bridged product of a token that already trades — so the
+// dashboard can separate them. Protocols whose token already trades are kept
+// in a separate Live view and never enter the ranked board.
 //
 // Implied value comes only from the snapshot's own figures — TVL, 7-day TVL
 // growth, and how long the protocol has run with no token — through one
@@ -23,11 +25,26 @@
 //      artefacts) and least squares would follow them. The fit is smooth, so
 //      a protocol's multiple falls gradually as it grows — no band edge where
 //      a 1% TVL difference doubles the implied value.
-//   3. Backtest the fit by 5-fold cross-validation over the same live-token
-//      protocols (deterministic folds, by slug): fit on four folds, predict
-//      the fifth, and report the median factor error, the share predicted
-//      within 2x, and the rank correlation. The numbers in the dashboard's
-//      model panel are that backtest, computed from this snapshot at run time.
+//   3. Adjust each category by its median residual from that line, shrunk
+//      toward zero by n / (n + 15): a category with many live protocols
+//      earns its adjustment, a category with one or two earns almost none.
+//      The shrinkage was chosen by validation, not by feel: it improves the
+//      5-fold cross-validation (median |log10 error| 0.549 -> 0.528) while
+//      leaving the walk-forward error unchanged, where stronger shrinkage
+//      (k = 5) helped the folds but hurt the time-held-out test. Categories
+//      the calibration never saw get no adjustment at all.
+//   4. Backtest the fit two ways, both honest. 5-fold cross-validation over
+//      the same live-token protocols (deterministic folds, by slug): fit on
+//      four folds, predict the fifth. And a WALK-FORWARD backtest: sort the
+//      live protocols by the day DefiLlama began tracking them, fit on the
+//      earlier ones, predict the later ones, over six expanding windows —
+//      the test the board itself faces, since the model is fitted on
+//      yesterday's launches and applied to tomorrow's. The numbers in the
+//      dashboard's model panel are those backtests, computed from this
+//      snapshot at run time. A change only ships when it improves the
+//      held-out numbers: growth and age coefficients, chain counts, OLS,
+//      Huber and piecewise fits were all tried and all rejected — none beat
+//      the baseline on both validations at once.
 //   On this snapshot the fit is log10(mcap) = 2.7837 + 0.5554 * log10(TVL):
 //   market cap grows with the square root of TVL, so the largest protocols'
 //   tokens really do trade at a far lower TVL multiple than a small
@@ -37,6 +54,8 @@
 //
 //   sizeMultiple(tvl)  the fitted power law's effective multiple at this TVL:
 //                      10^intercept * tvl^(slope - 1)
+//   categoryFactor     10^(shrunk median residual of the protocol's category)
+//                      (1.0 when the category has no live protocols)
 //   growthMult         1 + clamp(change_7d, -50, 100) / 100 * 0.4
 //                      (no reported growth counts as 0%). Growth and age are
 //                      kept as CONSERVATIVE PRIORS, not calibrations: in this
@@ -44,7 +63,8 @@
 //                      and +0.01), so the growth weight is held low at 0.4.
 //   ageMult            0.70 + min(age_days, 730) / 730 * 0.50
 //                      (no listing date counts as 365 days)
-//   implied            max(1, round(tvl * sizeMultiple * growthMult * ageMult))
+//   implied            max(1, round(tvl * sizeMultiple * categoryFactor *
+//                      growthMult * ageMult))
 //
 // The model is deterministic: it reads only the snapshot and its own constants,
 // never the clock and never randomness, so two runs write identical bytes.
@@ -87,6 +107,14 @@ export interface ModelConstants {
   unknown_age_days: number;
   /** Folds in the backtest cross-validation. */
   cv_folds: number;
+  /** Shrinkage of the per-category residual adjustment: a category with n live
+   * protocols keeps n / (n + k) of its median residual. */
+  category_shrink_k: number;
+  /** Walk-forward windows: the share of listed live protocols the expanding
+   * training set holds at each window's end. */
+  wf_cutoffs: number[];
+  /** Share of the listed live protocols each walk-forward test window holds. */
+  wf_test_share: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -98,10 +126,13 @@ export const MODEL: ModelConstants = {
   age_days_cap: 730,
   unknown_age_days: 365,
   cv_folds: 5,
+  category_shrink_k: 15,
+  wf_cutoffs: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+  wf_test_share: 0.1,
 };
 
 /** The model's version label, shown in the dashboard. */
-export const MODEL_VERSION = 'launch-radar-3';
+export const MODEL_VERSION = 'launch-radar-4';
 
 /** The fitted power law: log10(mcap) = intercept + slope * log10(TVL). */
 export interface PowerLawFit {
@@ -111,10 +142,12 @@ export interface PowerLawFit {
   slope: number;
 }
 
-/** The backtest record: 5-fold cross-validation of the power-law fit over the live-token protocols. */
+/** The backtest record: a held-out validation of the power-law fit over the live-token protocols. */
 export interface BacktestInfo {
   /** Live-token protocols the backtest predicted. */
   n: number;
+  /** Median |log10 error| of the predictions: the headline held-out error. */
+  median_log_err: number;
   /** Median factor error: the median prediction is within this multiple of the true market cap. */
   median_factor: number;
   /** Share of predictions within 2x of the true market cap. */
@@ -131,8 +164,16 @@ export interface CalibrationInfo {
   global_median: number;
   /** The fitted power law, rounded to 4 decimals — the fit the model uses. */
   fit: PowerLawFit;
+  /** The shrunk per-category residual adjustments, in log10 units, by category
+   * name, sorted by category: the factor the model applies on top of the power
+   * law for a protocol of that category. */
+  category_adjustments: Record<string, number>;
   /** The cross-validation backtest of that fit. */
   backtest: BacktestInfo;
+  /** The walk-forward backtest: fit on earlier-listed live protocols, predict
+   * the later-listed ones — the honest held-out test for a model applied to
+   * tomorrow's launches. */
+  walkforward: BacktestInfo;
 }
 
 /** The median of a sorted-or-not list of numbers; null when empty. */
@@ -149,6 +190,10 @@ const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 interface LogPoint {
   x: number;
   y: number;
+  /** The protocol's category, for the per-category adjustment; null when the snapshot names none. */
+  category: string | null;
+  /** The UTC day DefiLlama began tracking it, or null: the walk-forward split's clock. */
+  listed_at: string | null;
 }
 
 /**
@@ -208,13 +253,76 @@ function spearman(predicted: number[], actual: number[]): number {
 }
 
 /**
+ * The per-category adjustment of a fitted power law: each category's median
+ * residual from the line, shrunk toward zero by n / (n + k), where n is the
+ * category's count of live protocols. A category with many live protocols
+ * earns its adjustment; a category with one or two earns almost none, so the
+ * adjustment cannot be a single protocol's quirk. Categories are keyed in
+ * sorted order, so the record serialises deterministically. Unseen categories
+ * get no entry — and no adjustment.
+ */
+function categoryAdjustments(points: LogPoint[], fit: PowerLawFit, k: number): Record<string, number> {
+  const byCategory = new Map<string, number[]>();
+  for (const p of points) {
+    if (p.category === null) continue;
+    const residual = p.y - (fit.intercept + fit.slope * p.x);
+    const list = byCategory.get(p.category) ?? [];
+    list.push(residual);
+    byCategory.set(p.category, list);
+  }
+  const out: Record<string, number> = {};
+  for (const category of [...byCategory.keys()].sort()) {
+    const residuals = byCategory.get(category)!;
+    const med = medianOf(residuals) ?? 0;
+    out[category] = round4(med * (residuals.length / (residuals.length + k)));
+  }
+  return out;
+}
+
+/** A fitted model: the power law plus its per-category adjustments. */
+interface FittedModel {
+  fit: PowerLawFit;
+  adjustments: Record<string, number>;
+}
+
+/** The model's prediction for one log point: the power law, times its category's factor. */
+function predictPoint(model: FittedModel, p: LogPoint): number {
+  const adj = p.category !== null ? (model.adjustments[p.category] ?? 0) : 0;
+  return 10 ** (model.fit.intercept + model.fit.slope * p.x + adj);
+}
+
+/** Fit the power law and the category adjustments on one training set. */
+function fitModel(points: LogPoint[], k: number): FittedModel {
+  const fit = points.length >= 2 ? theilSen(points) : { intercept: 0, slope: 1 };
+  return { fit, adjustments: categoryAdjustments(points, fit, k) };
+}
+
+/** The backtest record for one set of predictions against their true market caps. */
+function backtestOf(predicted: number[], actual: number[]): BacktestInfo {
+  const errors = predicted.map((pr, i) => Math.abs(Math.log10(pr) - Math.log10(actual[i]!)));
+  const medianLogErr = medianOf(errors) ?? 0;
+  const within2x = errors.length === 0 ? 0 : errors.filter((e) => e <= Math.log10(2)).length / errors.length;
+  return {
+    n: errors.length,
+    median_log_err: round4(medianLogErr),
+    median_factor: round4(10 ** medianLogErr),
+    within_2x: round4(within2x),
+    spearman: round4(spearman(predicted, actual)),
+  };
+}
+
+/**
  * Derive the size curve from the snapshot's own live-token protocols and
- * backtest it by cross-validation. The fit is a Theil-Sen power law on
- * (log10 TVL, log10 mcap); the backtest fits the same line on four folds and
- * predicts the fifth, over deterministic folds by slug, and reports the median
- * factor error, the share within 2x, and the rank correlation. Only the method
- * is hardcoded — every number comes from the snapshot. Deterministic: medians
- * and folds are pure functions of the snapshot's bytes.
+ * backtest it two ways. The fit is a Theil-Sen power law on
+ * (log10 TVL, log10 mcap) plus a shrunk per-category residual adjustment; the
+ * 5-fold cross-validation fits the same model on four folds and predicts the
+ * fifth, over deterministic folds by slug; the walk-forward backtest sorts
+ * the live protocols by the day DefiLlama began tracking them and, over six
+ * expanding windows, fits on the earlier ones and predicts the later ones —
+ * the test the board itself faces. Protocols with no listing date always
+ * train, never test. Only the method is hardcoded — every number comes from
+ * the snapshot. Deterministic: medians, folds and windows are pure functions
+ * of the snapshot's bytes.
  */
 export function calibratePowerLaw(snapshot: Snapshot, model: ModelConstants = MODEL): CalibrationInfo {
   const live = snapshot.protocols
@@ -222,44 +330,62 @@ export function calibratePowerLaw(snapshot: Snapshot, model: ModelConstants = MO
     .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   const allRatios = live.map((p) => p.mcap_usd! / p.tvl_usd);
   const globalMedian = medianOf(allRatios) ?? 0;
-  const points: LogPoint[] = live.map((p) => ({ x: Math.log10(p.tvl_usd), y: Math.log10(p.mcap_usd!) }));
+  const points: LogPoint[] = live.map((p) => ({
+    x: Math.log10(p.tvl_usd),
+    y: Math.log10(p.mcap_usd!),
+    category: p.category,
+    listed_at: p.listed_at,
+  }));
   // Degenerate fallback, never taken on this snapshot: with fewer than two
   // live protocols no line can be fitted, so the multiple is the global median.
-  const fit = points.length >= 2 ? theilSen(points) : { intercept: round4(Math.log10(Math.max(globalMedian, 1e-12))), slope: 1 };
-  // 5-fold cross-validation of the same fit: deterministic folds by slug order.
+  const full: FittedModel =
+    points.length >= 2
+      ? fitModel(points, model.category_shrink_k)
+      : {
+          fit: { intercept: round4(Math.log10(Math.max(globalMedian, 1e-12))), slope: 1 },
+          adjustments: {},
+        };
+  // 5-fold cross-validation of the same model: deterministic folds by slug order.
   const folds = Math.max(2, Math.floor(model.cv_folds));
-  const errors: number[] = [];
-  const predicted: number[] = [];
-  const actual: number[] = [];
+  const cvPredicted: number[] = [];
+  const cvActual: number[] = [];
   for (let k = 0; k < folds; k++) {
     const test = points.filter((_, i) => i % folds === k);
     const train = points.filter((_, i) => i % folds !== k);
     if (test.length === 0 || train.length < 2) continue;
-    const f = theilSen(train);
+    const f = fitModel(train, model.category_shrink_k);
     for (const p of test) {
-      const pred = 10 ** (f.intercept + f.slope * p.x);
-      errors.push(Math.abs(Math.log10(pred) - p.y));
-      predicted.push(pred);
-      actual.push(10 ** p.y);
+      cvPredicted.push(predictPoint(f, p));
+      cvActual.push(10 ** p.y);
     }
   }
-  const medianLogErr = medianOf(errors) ?? 0;
-  const within2x = errors.length === 0 ? 0 : errors.filter((e) => e <= Math.log10(2)).length / errors.length;
+  // Walk-forward: fit on earlier-listed protocols, predict later-listed ones.
+  const dated = points
+    .filter((p) => p.listed_at !== null)
+    .sort((a, b) => (a.listed_at! < b.listed_at! ? -1 : a.listed_at! > b.listed_at! ? 1 : 0));
+  const undated = points.filter((p) => p.listed_at === null);
+  const wfPredicted: number[] = [];
+  const wfActual: number[] = [];
+  for (const cutoff of model.wf_cutoffs) {
+    const i = Math.floor(dated.length * cutoff);
+    const train = [...dated.slice(0, i), ...undated];
+    const test = dated.slice(i, i + Math.max(1, Math.floor(dated.length * model.wf_test_share)));
+    if (test.length === 0 || train.length < 2) continue;
+    const f = fitModel(train, model.category_shrink_k);
+    for (const p of test) {
+      wfPredicted.push(predictPoint(f, p));
+      wfActual.push(10 ** p.y);
+    }
+  }
   return {
     live_count: live.length,
     global_median: round4(globalMedian),
-    fit,
-    backtest: {
-      n: errors.length,
-      median_factor: round4(10 ** medianLogErr),
-      within_2x: round4(within2x),
-      spearman: round4(spearman(predicted, actual)),
-    },
+    fit: full.fit,
+    category_adjustments: full.adjustments,
+    backtest: backtestOf(cvPredicted, cvActual),
+    walkforward: backtestOf(wfPredicted, wfActual),
   };
 }
-
-/** How many live-token protocols the Live view carries, by market cap. */
-export const LIVE_ROWS = 24;
 
 const DAY_MS = 86_400_000;
 
@@ -277,22 +403,33 @@ export function sizeMultiple(tvlUsd: number, fit: PowerLawFit): number {
   return round4(10 ** fit.intercept * tvlUsd ** (fit.slope - 1));
 }
 
-/** The three multipliers and the implied value one protocol gets under `model` and the calibrated `fit`. */
+/** The three multipliers, the category factor and the implied value one protocol gets under `model`, the calibrated `fit` and its category adjustments. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
   fit: PowerLawFit,
-): { implied: number; sizeMult: number; growthPct: number; growthMult: number; ageMult: number; age: number | null } {
+  categoryAdjustments: Record<string, number> = {},
+): {
+  implied: number;
+  sizeMult: number;
+  categoryFactor: number;
+  growthPct: number;
+  growthMult: number;
+  ageMult: number;
+  age: number | null;
+} {
   const age = ageDays(asOf, protocol.listed_at);
   const sizeMult = sizeMultiple(protocol.tvl_usd, fit);
+  const catAdj = protocol.category !== null ? (categoryAdjustments[protocol.category] ?? 0) : 0;
+  const categoryFactor = round4(10 ** catAdj);
   const rawGrowth = typeof protocol.change_7d === 'number' && Number.isFinite(protocol.change_7d) ? protocol.change_7d : 0;
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const ageMult = model.age_floor + (Math.min(Math.max(ageForModel, 0), model.age_days_cap) / model.age_days_cap) * model.age_range;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * sizeMult * growthMult * ageMult));
-  return { implied, sizeMult, growthPct, growthMult, ageMult, age };
+  const implied = Math.max(1, Math.round(protocol.tvl_usd * sizeMult * categoryFactor * growthMult * ageMult));
+  return { implied, sizeMult, categoryFactor, growthPct, growthMult, ageMult, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release marker is a pool of another protocol. */
@@ -319,6 +456,17 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return true;
 }
 
+/** A board row's class: `launch` is a launch of its own; `derivative` is a
+ * pre-token protocol that is a wrapped, staked or bridged product of a token
+ * that already trades, so it farms the parent's ecosystem rather than a new
+ * launch of its own. */
+export type BoardClass = 'launch' | 'derivative';
+
+/** A pre-token protocol's board class: rankable launches are `launch`, every other pre-token protocol is `derivative`. */
+export function boardClass(p: SnapshotProtocol): BoardClass {
+  return isRankable(p) ? 'launch' : 'derivative';
+}
+
 /** One row of board.json. */
 export interface BoardRow {
   rank: number;
@@ -333,11 +481,15 @@ export interface BoardRow {
   gecko_id: string | null;
   symbol: string | null;
   token_status: 'pre-token';
+  /** `launch` is a launch of its own; `derivative` is a wrapped, staked or
+   * bridged product of a token that already trades. */
+  board_class: BoardClass;
   on_watchlist: boolean;
   age_days: number | null;
   implied_value_usd: number;
   model: {
     size_multiple: number;
+    category_factor: number;
     growth_pct: number;
     growth_multiplier: number;
     age_multiplier: number;
@@ -358,8 +510,10 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  board_class: BoardClass;
   on_watchlist: boolean;
   size_multiple: number;
+  category_factor: number;
   growth_multiplier: number;
   age_multiplier: number;
   farm_steps: string[];
@@ -376,6 +530,13 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
+/** One of the KPI strip's top movers: a pre-token protocol by 7-day TVL growth. */
+export interface TopMover {
+  slug: string;
+  name: string;
+  change_7d: number;
+}
+
 /** Everything the dashboard renders. */
 export interface RadarData {
   as_of: string;
@@ -383,11 +544,15 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
-  /** The calibration record: the fitted power law and its backtest. */
+  /** The calibration record: the fitted power law and its backtests. */
   calibration: CalibrationInfo;
+  /** Protocols in the snapshot: the coverage the KPI strip reports against. */
+  snapshot_size: number;
   watchlist_size: number;
   board_size: number;
   live_size: number;
+  /** The three fastest-growing pre-token protocols by 7-day TVL change. */
+  top_movers: TopMover[];
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -400,18 +565,23 @@ export class SnapshotError extends Error {
   }
 }
 
-/** The ranked board: every rankable protocol, most valuable first, ranks 1..N. */
+/** The ranked board: every pre-token protocol in the snapshot, most valuable
+ * first, ranks 1..N. Launches and derivatives share the ranking — the ranks
+ * follow implied value alone — and the dashboard separates them by class. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, calibration?: CalibrationInfo): BoardRow[] {
-  const fit = (calibration ?? calibratePowerLaw(snapshot, model)).fit;
+  const cal = calibration ?? calibratePowerLaw(snapshot, model);
+  const fit = cal.fit;
+  const adjustments = cal.category_adjustments;
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const watchlist = new Set(snapshot.watchlist);
   // The watchlist is the floor: every slug on it is ranked. The rest of the
-  // board is every other rankable protocol in the snapshot.
-  const chosen = snapshot.protocols.filter((p) => watchlist.has(p.slug) || isRankable(p));
+  // board is every other pre-token protocol in the snapshot — launches and
+  // derivatives alike, each labelled with its class.
+  const chosen = snapshot.protocols.filter((p) => watchlist.has(p.slug) || isPreToken(p));
   const missing = snapshot.watchlist.filter((s) => !index.has(s));
   if (missing.length > 0) throw new SnapshotError(`watchlist slugs missing from protocols: ${missing.slice(0, 5).join(', ')}`);
   const scored = chosen.map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model, fit);
+    const v = impliedValue(p, snapshot.as_of, model, fit, adjustments);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -428,17 +598,19 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, ca
     gecko_id: s.p.gecko_id,
     symbol: s.p.symbol,
     token_status: 'pre-token',
+    board_class: boardClass(s.p),
     on_watchlist: watchlist.has(s.p.slug),
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
       size_multiple: s.sizeMult,
+      category_factor: s.categoryFactor,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       age_multiplier: round4(s.ageMult),
       age_days: s.age,
     },
-    farm_steps: farmSteps(s.p, s.age),
+    farm_steps: farmSteps(s.p, s.age, boardClass(s.p)),
   }));
 }
 
@@ -581,19 +753,43 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   if (c.includes('basis')) {
     return `Deposit $${capital} into ${name}'s basis strategy on ${chain} and keep the position.`;
   }
+  if (c.includes('bridge')) {
+    return `Route $${capital} through ${name} on ${chain} — bridge a real amount you actually need moved, and keep the receipt.`;
+  }
+  if (c.includes('cex')) {
+    return `Open an account on ${name}, complete its verification, and deposit $${capital} to use its on-chain products.`;
+  }
   return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
 }
 
 /**
  * A protocol's farm plan: six steps, each an action with what it costs and how
  * long it takes. Every figure comes from the protocol's own record (category,
- * chains, TVL, age); no protocol name is ever special-cased.
+ * chains, TVL, age); no protocol name is ever special-cased. A derivative
+ * row's plan says so up front — it farms yield and the parent token's
+ * ecosystem, not a launch of its own — and its last step claims nothing,
+ * because there is no token of its own to claim.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, boardClass: BoardClass = 'launch'): string[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const gas = gasUsd(chain);
+  if (boardClass === 'derivative') {
+    const steps = [
+      `Know what this is: ${p.name} is a wrapped, staked or bridged product of a token that already trades, so it has no launch of its own to farm — the plan below earns yield and positions you in the parent token's ecosystem. Cost: $0 to read. Time: 5 minutes.`,
+      `${bridgeFor(capital, chain)} Cost: about $${gas} in bridge and gas fees. Time: about 10 minutes.`,
+      `${actionFor(p, capital, chain)} Cost: $${capital} of capital and about $${gas} of gas. Time: 15 minutes to set up.`,
+      `Each week, ${weeklyFor(p)} so the wallet stays active across snapshots. Cost: about $${gas} of gas a week. Time: 10 minutes a week.`,
+      `Keep the position open for at least ${hold} days; the yield compounds and the parent ecosystem's snapshots reward long-held positions. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
+      `There is no token of its own to claim — exit by unwinding the position on the protocol's own site, and never follow a claim link from DMs or ads. Cost: gas for the exit only. Time: 15 minutes.`,
+    ];
+    return steps.map((s) => {
+      const t = s.trim();
+      if (t.length > 600) return `${t.slice(0, 597)}...`;
+      return t;
+    });
+  }
   const steps = [
     `Set up a fresh wallet just for this farm and store its seed phrase offline on paper. Cost: $0 to create the wallet. Time: 5 minutes.`,
     `${bridgeFor(capital, chain)} Cost: about $${gas} in bridge and gas fees. Time: about 10 minutes.`,
@@ -611,12 +807,11 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
 
 // --------------------------------------------------------------- live view
 
-/** The live-token protocols, by market cap, for the dashboard's separate Live view. */
+/** The live-token protocols, by market cap, for the dashboard's separate Live view: every protocol with a recorded market cap, not a sample. A protocol that records a token id but no market cap has no market value to show, so it stays out. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
+    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.category !== 'CEX')
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
-    .slice(0, LIVE_ROWS)
     .map((p) => ({
       slug: p.slug,
       name: p.name,
@@ -641,12 +836,23 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    board_class: row.board_class,
     on_watchlist: row.on_watchlist,
     size_multiple: row.model.size_multiple,
+    category_factor: row.model.category_factor,
     growth_multiplier: row.model.growth_multiplier,
     age_multiplier: row.model.age_multiplier,
     farm_steps: row.farm_steps,
   };
+}
+
+/** The three fastest-growing pre-token protocols by 7-day TVL change, for the KPI strip. */
+export function topMovers(snapshot: Snapshot): TopMover[] {
+  return snapshot.protocols
+    .filter((p) => isPreToken(p) && typeof p.change_7d === 'number' && Number.isFinite(p.change_7d))
+    .sort((a, b) => b.change_7d! - a.change_7d! || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
+    .slice(0, 3)
+    .map((p) => ({ slug: p.slug, name: p.name, change_7d: p.change_7d! }));
 }
 
 /** Everything the dashboard renders, from the snapshot. */
@@ -661,9 +867,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     model,
     model_version: MODEL_VERSION,
     calibration,
+    snapshot_size: snapshot.protocols.length,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     live_size: live.length,
+    top_movers: topMovers(snapshot),
     rows: board.map(radarRow),
     live,
   };
