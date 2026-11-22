@@ -83,6 +83,18 @@ td.name small { display: block; color: var(--muted); font-weight: 400; font-size
 }
 .badge.watch { border-color: var(--accent); color: var(--accent); margin-left: 6px; }
 .badge.deriv { border-color: var(--muted); color: var(--muted); margin-left: 6px; }
+.badge.verdict-farm { border-color: var(--teal); color: var(--teal); }
+.badge.verdict-watch { border-color: var(--accent); color: var(--accent); }
+.badge.verdict-skip { border-color: var(--red); color: var(--red); }
+.badge.verdict-yield { border-color: var(--muted); color: var(--muted); }
+
+.integrity-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 0 0 12px; }
+.integrity-facts div { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.integrity-facts dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.integrity-facts dd { margin: 2px 0 0; font-size: 16px; font-weight: 700; }
+.limits { margin: 10px 0 0; padding-left: 20px; color: var(--muted); font-size: 13px; }
+.limits li { margin-bottom: 4px; }
+.limits li::marker { color: var(--accent); }
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
 .kpi h3 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
@@ -122,6 +134,16 @@ dialog::backdrop { background: rgba(3, 6, 14, 0.72); }
 .fact dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
 .fact dd { margin: 2px 0 0; font-size: 17px; font-weight: 700; }
 .implied-big { font-size: 26px; font-weight: 800; color: var(--accent); margin: 4px 0 2px; }
+.verdict-panel { background: var(--panel-2); border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 8px; padding: 12px 14px; margin: 14px 0; }
+.verdict-panel h3 { margin: 0 0 4px; font-size: 15px; }
+.verdict-panel p { margin: 0; font-size: 14px; color: var(--muted); }
+.verdict-panel.verdict-farm { border-left-color: var(--teal); }
+.verdict-panel.verdict-farm h3 { color: var(--teal); }
+.verdict-panel.verdict-watch { border-left-color: var(--accent); }
+.verdict-panel.verdict-watch h3 { color: var(--accent); }
+.verdict-panel.verdict-skip { border-left-color: var(--red); }
+.verdict-panel.verdict-skip h3 { color: var(--red); }
+.verdict-panel.verdict-yield h3 { color: var(--muted); }
 .steps { margin: 8px 0 0; padding-left: 20px; }
 .steps li { margin-bottom: 10px; }
 .steps li::marker { color: var(--accent); font-weight: 700; }

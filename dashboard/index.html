@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Launch Radar — pre-token protocols ranked by implied value</title>
+<title>Launch Radar — pre-token protocols ranked by expected launch value</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
     <div>
       <p class="eyebrow">Token launch radar</p>
       <h1>Launch Radar</h1>
-      <p class="tagline">Every protocol that records no token, ranked by what its launch would be worth — and how to farm it.</p>
+      <p class="tagline">Every protocol that records no token, ranked by its expected launch value — what a token would be worth, weighted by how often protocols like it launch — and how to farm it.</p>
     </div>
     <dl class="stats" id="stats"></dl>
   </div>
@@ -43,6 +43,15 @@
           <option value="derivative">Derivatives only</option>
         </select>
       </label>
+      <label class="field">Farm verdict
+        <select id="verdict">
+          <option value="all">All verdicts</option>
+          <option value="farm">Farm</option>
+          <option value="watch">Watch</option>
+          <option value="skip">Skip</option>
+          <option value="yield">Yield</option>
+        </select>
+      </label>
       <button type="button" class="button" id="clear">Clear filters</button>
     </div>
     <p class="count" id="count"></p>
@@ -58,7 +67,9 @@
             <th><button type="button" data-sort="tvl">TVL</button></th>
             <th><button type="button" data-sort="growth">7d</button></th>
             <th><button type="button" data-sort="age">Age</button></th>
-            <th><button type="button" data-sort="value">Implied value</button></th>
+            <th><button type="button" data-sort="odds">Odds</button></th>
+            <th><button type="button" data-sort="value">Expected value</button></th>
+            <th>Verdict</th>
             <th>Status</th>
           </tr>
         </thead>
@@ -68,20 +79,22 @@
     <p class="note" id="board-note"></p>
   </section>
 
+  <section class="panel" id="integrity" aria-label="Data integrity"></section>
+
   <section class="panel" id="model" aria-label="The value model">
-    <h2>How implied value is scored</h2>
-    <p>One function scores every protocol from the snapshot's own figures — TVL, 7-day growth, and how long it has run with no token. No protocol name is special-cased. The size curve is fitted from the snapshot's own live-token protocols at run time — a robust power law of market cap on TVL, plus a shrunk adjustment per category, backtested two ways — so the model follows the snapshot's own evidence, not numbers asserted in code.</p>
-    <p class="formula">implied = TVL &times; size multiple &times; category factor &times; growth multiplier &times; age multiplier</p>
+    <h2>How expected value is scored</h2>
+    <p>One function scores every protocol from the snapshot's own figures — TVL, 7-day growth, how long it has run with no token, and what comparable protocols did. No protocol name is special-cased. The size curve is fitted from the snapshot's own live-token protocols at run time, every value term is fitted by a grid search scored on two held-out tests, and the launch odds come from a regression on the peers' own record — so the model follows the snapshot's evidence, not numbers asserted in code.</p>
+    <p class="formula">expected = TVL &times; size multiple &times; category factor &times; growth multiplier &times; age multiplier &times; launch odds</p>
     <div class="model-grid" id="model-grid"></div>
-    <p class="note">An estimate, not a price. It says what a launch would be worth if the protocol's record stayed as it is; it does not predict whether or when a token is issued.</p>
+    <p class="note">An estimate, not a price. It says what a launch would be worth if the protocol's record stayed as it is, weighted by how often protocols like it carry a token; it does not predict whether or when a token is issued.</p>
   </section>
 
   <section class="panel" id="live" aria-label="Protocols whose token already trades" hidden>
     <h2>Already trading — the market's own values</h2>
-    <p>These protocols have a token, so the board does not rank them. Every one with a recorded market cap is shown here for comparison, never mixed into the pre-token ranking.</p>
+    <p>These protocols have a token, so the board does not rank them. Every one with a recorded market cap is shown here for comparison, never mixed into the pre-token ranking. The power law is fitted on these protocols' market caps.</p>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>7d</th></tr></thead>
+        <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>Mcap / TVL</th><th>7d</th></tr></thead>
         <tbody id="live-rows"></tbody>
       </table>
     </div>
@@ -89,7 +102,7 @@
 
   <footer class="panel foot">
     <p id="source-note"></p>
-    <p>Method: a protocol is pre-token when the snapshot records no market cap, no CoinGecko id and no symbol for it. The board covers every protocol on the snapshot's watchlist and every other pre-token protocol in the snapshot. Each row is classed: a launch is a launch of its own, a derivative is a wrapped, staked or bridged product of a token that already trades — the board ranks both by implied value and the class filter separates them, because a derivative farms the parent token's ecosystem, not a launch of its own.</p>
+    <p>Method: a protocol is pre-token when the snapshot records no market cap, no CoinGecko id and no symbol for it. The board covers every protocol on the snapshot's watchlist and every other pre-token protocol in the snapshot. Each row is classed: a launch is a launch of its own, a derivative is a wrapped, staked or bridged product of a token that already trades — the board ranks both by expected value and the class filter separates them, because a derivative farms the parent token's ecosystem, not a launch of its own. The farm verdict compares each launch's expected value per dollar spent with the other launches on the board; derivatives get a yield verdict instead, because there is no launch of their own to value.</p>
   </footer>
 </main>
 
