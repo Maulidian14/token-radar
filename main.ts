@@ -1,18 +1,12 @@
-// Launch Radar — the token-radar-01 entrypoint (Node 22, standard library only).
+// Launch Radar v6 — the token-radar-01 entrypoint (Node, standard library only).
 //
 // Reads the sealed snapshot (/input/snapshot.json, or --input <file|dir>),
-// ranks every pre-token protocol with the model in lib/model.ts, and writes:
-//   /output/board.json    the ranked board (rows 1..N by expected implied value)
+// ranks the launch candidates with the model in lib/model.ts, and writes:
+//   /output/board.json    the ranked board (rows 1..N by expected value)
 //   /output/data.js       the dashboard's dataset (window.RADAR)
 //   /output/dashboard/    this repository's dashboard/ page
 //   /output/screenshots/  this repository's screenshots/
 //   /output/dossier.json  the dossier the judge reads, via vendor/makefun-board.ts
-//
-// Model version 5 ("launch-radar-5"): every value term is fitted by a grid
-// search scored on two held-out tests, and each row's expected value is the
-// power law's gross value times launch odds from a ridge logistic regression
-// on the peers' record. Farm plans end in a costed verdict, and the
-// dashboard carries an integrity strip. See lib/model.ts and README.md.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json

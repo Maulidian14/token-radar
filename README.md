@@ -1,104 +1,83 @@
-# Launch Radar — make.fun token-radar-01
+# Launch Radar v6 — make.fun token-radar-01
 
 A token launch radar: it reads a sealed DefiLlama snapshot, finds the
-protocols that record no token, ranks them by an implied launch value, and
-hands in a web dashboard with the board, a detail view per protocol, and a
-farm plan for each one.
+protocols that record no token, ranks the launch candidates by the
+EXPECTED value of their launch, and hands in a web dashboard with the
+board, a detail view per protocol, and a farm plan for each one.
 
-## The model
+## The model (launch-radar-6)
 
-One function, `impliedValue` in `lib/model.ts`, scores every protocol from
-the snapshot's own figures — TVL, 7-day TVL growth, how long it has run
-with no token, and what comparable protocols did. No protocol name is
-special-cased. The score is an expected value: the power law's gross
-implied value, times the launch odds from the peers' record.
+The board ranks launch candidates — pre-token protocols that are not a
+wrapped, staked or bridged product of a token that already trades — by:
 
-The size multiple is self-calibrating: `calibratePowerLaw` fits it from the
-snapshot's own live-token protocols at run time. Market cap grows with the
-square root of TVL, so the fit is a power law, log10(mcap) = intercept +
-slope * log10(TVL), fitted by Theil-Sen — the slope is the median of every
-pairwise slope and the intercept the median residual, so the few extreme
-ratios (aave-v2 18.96x, rain 400x — DefiLlama attribution artefacts) cannot
-pull the line. The fit is smooth: a protocol's multiple falls gradually as
-it grows, with no band edge where a 1% TVL difference doubles the implied
-value. On top of the line, each category carries its median residual,
-shrunk toward zero by n / (n + k). The model is backtested two ways —
-5-fold cross-validation over the live-token protocols (deterministic folds,
-by slug) and a walk-forward backtest that fits on earlier-listed live
-tokens and predicts the later-listed ones, over six expanding windows — and
-the dashboard's model panel reports both. Only the method is hardcoded;
-every number comes from the snapshot. The derived fit is conservative —
-circulating market caps, not fully diluted values — and no premium factor
-is assumed.
+    expected value = gross implied value × launch odds
 
-Every value term is fitted, not asserted: a grid search over 48
-combinations picks the growth weight, the age range and the category shrink
-constant, scored on the mean of the two held-out tests of the full model.
-On this snapshot it picks growth weight 0.2, age range 0.25 and k = 150
-(mean held-out median log error 0.4811; cross-validation 0.5162,
-walk-forward 0.4459). Growth and age coefficients, chain counts, OLS,
-Huber and piecewise fits were all tried against both validations in earlier
-versions and all rejected — none beat the baseline on both at once.
+**Gross value** is v4's model, kept whole: a Theil-Sen power law of
+log10(market cap) on log10(TVL), fitted at runtime from the snapshot's
+live-token protocols (intercept 2.7837, slope 0.5554 on this snapshot),
+a per-category residual adjustment shrunk by n/(n+15), a growth
+multiplier (weight 0.4, growth clamped to −50%…+100%), and an age
+multiplier (0.70 + min(age, 730)/730 × 0.50). Backtested two ways:
+5-fold CV and a walk-forward test in time.
 
-The launch odds are a ridge logistic regression on the outcome "the
-protocol's record carries a token" (416 of the snapshot's 758 protocols
-do), with category dummies (one per category with at least 15 protocols),
-log TVL, age, 7-day change and chain count, all standardised against the
-snapshot. The ridge penalty is picked by 5-fold cross-validation on
-log-loss (λ = 1 here), and the odds model is validated twice: 5-fold
-(log-loss 0.5815, AUC 0.768, against a base-rate log-loss of 0.6884) and
-time-held-out (log-loss 0.7372, AUC 0.6025 — harder, because later-listed
-protocols are younger and have had less time to launch). The odds are
-clipped to [0.05, 0.95]. They describe the peers' record; they do not
-predict whether or when any one protocol issues a token.
+**Launch odds** are new in v6: a Weibull current-status survival model
+for the time from listing to launch, fitted at runtime (BFGS, analytic
+gradient). A protocol that records a token has launched (its launch
+time is at most its age); a pre-token protocol has not (its launch time
+is past its age). The scale is log-linear in log TVL, 7-day growth and
+category dummies (14 categories with ≥15 protocols); the shape k is
+fitted. On this snapshot k = 0.43 — below 1, so the launch hazard FALLS
+with age, which is what the snapshot's own record shows: protocols that
+have run years with no token are less likely to launch next year than
+young ones. The odds are P(launch within 365 days | not launched yet),
+clipped to 5%–95%.
 
-Each farm plan ends in a costed verdict: the plan's total cost (capital
-plus gas for setup, the weekly keep-alive and the exit) and total time,
-and a verdict from the protocol's expected value per dollar spent against
-the other launches on the board — top quarter farm, middle half watch,
-bottom quarter skip. Derivatives get a yield verdict: there is no launch
-of their own to value. The dashboard also carries an integrity strip —
-snapshot date and source, coverage counts, missing-data shares, and what
-the model cannot see — built from the snapshot and the calibration, so it
-can never drift from the numbers.
+Validation (computed at runtime, shown on the dashboard):
 
-```
-sizeMultiple(tvl)  fitted power law's effective multiple at this TVL:
-                     10^intercept * tvl^(slope - 1)
-                     (this snapshot: log10(mcap) = 2.7837 + 0.5554 * log10(TVL);
-                     the multiple falls smoothly from x0.64 at $5M TVL to x0.03 at $5B)
-categoryFactor     10^(shrunk median residual of the protocol's category)
-growthMult         1 + clamp(change_7d, -50, 100) / 100 * 0.2   (fitted)
-ageMult            0.70 + min(age_days, 730) / 730 * 0.25       (fitted)
-gross              tvl * sizeMultiple * categoryFactor * growthMult * ageMult
-odds               ridge logistic regression on the peers' record, clipped [0.05, 0.95]
-implied            max(1, round(gross * odds))
-```
+- Time-held-out (train on the earliest-listed 70%, score the latest
+  30%): log-loss 0.6164 against a base rate of 0.6884, AUC 0.6688.
+- 5-fold cross-validation: log-loss 0.6055, AUC 0.733.
 
-Model version: `launch-radar-5`.
+A plain logistic on "records a token" was tried and rejected: the
+cross-sectional target measures "has launched already", so its age
+coefficient either has to be forced negative (which breaks its
+time-held-out validation) or comes out positive (which calls the oldest
+protocols the likeliest to launch). The survival form resolves the
+tension honestly — age enters through the clock itself.
 
-A protocol is pre-token when the snapshot records no market cap, no
-CoinGecko id and no symbol for it. The board ranks every pre-token protocol
-in the snapshot — 342 rows — each classed as a launch (a launch of its own)
-or a derivative (a wrapped, staked or bridged product of a token that
-already trades, which farms the parent token's ecosystem rather than a new
-launch). The board covers every slug on the snapshot's watchlist. Protocols
-whose token already trades are shown separately, with the market's own
-values, never mixed into the ranking.
+**Verdict** — farm or watch, never skip. The estimated airdrop value
+per farmer is the expected value × a 10% farmer share (a typical
+airdrop allocation, stated as an assumption) ÷ an estimated farmer
+count (25 × √TVL-in-millions, clamped to 100–5000). Farm when that
+figure clears 3× the farm plan's cost (deployed capital + gas); watch
+otherwise. On this snapshot: 175 farm, 23 watch; the watchlist is
+33 farm, 7 watch, 0 skip.
+
+## The board
+
+198 launch candidates, ranked by expected value. Derivatives (144)
+are not ranked — a wrapped product has no launch of its own — but are
+listed in their own dashboard view with gross values and farm plans.
+All 416 token-trading protocols are listed in the Already trading view
+(market cap "—" where the snapshot records none). 198 + 144 + 416 =
+758: every protocol in the snapshot is accounted for.
+
+Top 10 on this snapshot: bittensor-dtao, usdd, steakhouse-financial,
+sentora-curator, bitfi-basis, veda, defi-saver-asset-management, onre,
+polymarket-international, gauntlet — all launches.
 
 ## Run it
 
-```
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json|dir>
-```
+    mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
-Writes `board.json`, `data.js`, `dashboard/`, `screenshots/` and
-`dossier.json` into the output directory. Two runs write identical bytes.
+Writes `out/board.json`, `out/data.js`, `out/dashboard/`,
+`out/screenshots/` and `out/dossier.json`. The run is deterministic:
+two runs write the same bytes.
 
 ## Layout
 
-- `main.ts` — the entrypoint (Node 22, standard library only, no network)
-- `lib/model.ts` — the value model, the board builder, the farm plans
-- `vendor/makefun-board.ts` — make.fun's dossier library, copied unchanged
-- `dashboard/` — the page: `index.html`, `app.css`, `app.js` (no network)
-- `screenshots/` — the board, a detail view, a filtered view
+- `main.ts` — the entrypoint: read the snapshot, build the board, write the outputs.
+- `lib/model.ts` — the model: gross calibration, Weibull odds, verdicts, farm plans, board builders.
+- `dashboard/` — the page: `index.html`, `app.css`, `app.js` (under 64 KB in all).
+- `screenshots/` — three screenshots of the dashboard (board, detail, filtered).
+- `vendor/makefun-board.ts` — the dossier library, unchanged from the kit.
