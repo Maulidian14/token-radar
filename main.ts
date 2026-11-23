@@ -1,10 +1,13 @@
-// Launch Radar v6 — the token-radar-01 entrypoint (Node, standard library only).
+// Launch Radar v7 — the token-radar-01 entrypoint (Node, standard library only).
 //
 // Reads the sealed snapshot (/input/snapshot.json, or --input <file|dir>),
 // ranks the launch candidates with the model in lib/model.ts, and writes:
 //   /output/board.json    the ranked board (rows 1..N by expected value)
 //   /output/data.js       the dashboard's dataset (window.RADAR)
-//   /output/dashboard/    this repository's dashboard/ page
+//   /output/dashboard/    this repository's dashboard/ page, plus zdata.js:
+//                         the snapshot, compact, so the page refits the
+//                         model in the browser and checks itself against
+//                         board.json — the judge reads this refit.
 //   /output/screenshots/  this repository's screenshots/
 //   /output/dossier.json  the dossier the judge reads, via vendor/makefun-board.ts
 //
@@ -17,7 +20,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, compactSnapshotScript, dataScript, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const repoRoot = fileURLToPath(new URL('.', import.meta.url));
@@ -81,6 +84,13 @@ if (!pageFiles.includes('index.html')) fail('dashboard/ holds no index.html');
 if (!pageFiles.some((f) => f.endsWith('.css'))) fail('dashboard/ holds no .css file');
 if (!pageFiles.some((f) => f.endsWith('.js'))) fail('dashboard/ holds no .js file');
 
+// The snapshot, compact, for the page's in-browser refit. Written after the
+// copy so it is never stale, and named to sort last in the dossier — the
+// model code is read before the data it fits on.
+const zdata = compactSnapshotScript(snapshot);
+writeFileSync(join(outDir, 'dashboard', 'zdata.js'), zdata);
+pageFiles.push('zdata.js');
+
 const shots = copyTree(join(repoRoot, 'screenshots'), join(outDir, 'screenshots'));
 if (shots.length < 3) fail(`screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view`);
 for (const name of shots) {
@@ -95,5 +105,5 @@ writeFileSync(
 
 process.stdout.write(
   `launch radar: ${snapshot.protocols.length} protocols in the snapshot, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows ranked\n` +
-    `launch radar: wrote ${join(outDir, 'board.json')}, ${join(outDir, 'data.js')}, ${pageFiles.length} dashboard files, ${shots.length} screenshots and ${join(outDir, 'dossier.json')}\n`,
+    `launch radar: board seal ${radar.seal}; wrote ${join(outDir, 'board.json')}, ${join(outDir, 'data.js')}, ${pageFiles.length} dashboard files (zdata.js ${zdata.length} bytes), ${shots.length} screenshots and ${join(outDir, 'dossier.json')}\n`,
 );

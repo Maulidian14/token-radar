@@ -101,7 +101,7 @@ export const MODEL: ModelConstants = {
   verdict_multiple: 3,
 };
 
-export const MODEL_VERSION = 'launch-radar-6';
+export const MODEL_VERSION = 'launch-radar-7';
 
 /** The fitted power law: log10(mcap) = intercept + slope * log10(TVL). */
 export interface PowerLawFit {
@@ -819,6 +819,12 @@ export interface BoardRow {
   verdict: 'farm' | 'watch';
   value_per_user_usd: number;
   plan_cost_usd: number;
+  /** Hours the farm plan takes: setup, weekly actions, monthly review, claim. */
+  plan_hours: number;
+  /** What the farm clears after its plan's cost: value per farmer minus plan cost. */
+  net_usd: number;
+  /** What the farm clears per hour of work: the net divided by the plan's hours. */
+  net_per_hour_usd: number;
   farmer_count: number;
   model: {
     size_multiple: number;
@@ -848,6 +854,9 @@ export interface RadarRow {
   verdict: 'farm' | 'watch';
   value_per_user_usd: number;
   plan_cost_usd: number;
+  plan_hours: number;
+  net_usd: number;
+  net_per_hour_usd: number;
   farmer_count: number;
   on_watchlist: boolean;
   size_multiple: number;
@@ -896,6 +905,8 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  /** The board's checksum, recomputed by the dashboard in the browser. */
+  seal: string;
   /** The calibration record: the fitted power law and its backtests. */
   calibration: CalibrationInfo;
   /** The fitted odds model and its validation. */
@@ -1003,10 +1014,32 @@ export function valuePerUserUsd(expectedValueUsd: number, p: SnapshotProtocol, m
  * times the plan's cost — a margin that pays for the gas and the locked
  * capital with room to spare — and watch otherwise. There is no skip: a
  * protocol on the board is a launch candidate, and the worst advice the
- * radar gives about one is to watch it.
+ * radar gives about one is to watch it. The verdict is shown with its net
+ * and its net per hour, so a reader can see how close the call is.
  */
 export function farmVerdict(expectedValueUsd: number, p: SnapshotProtocol, age: number | null, model: ModelConstants = MODEL): 'farm' | 'watch' {
   return valuePerUserUsd(expectedValueUsd, p, model) >= model.verdict_multiple * planCostUsd(p, age) ? 'farm' : 'watch';
+}
+
+/**
+ * Hours a farm plan takes: 30 minutes to set up, 10 minutes a week while
+ * it runs, 15 minutes a month to review, 15 minutes to claim or exit.
+ */
+export function planHours(age: number | null): number {
+  const hold = holdDaysFor(age);
+  const weeks = Math.ceil(hold / 7);
+  const months = Math.ceil(hold / 30);
+  return Math.round((0.5 + weeks / 6 + months * 0.25 + 0.25) * 100) / 100;
+}
+
+/** What the farm clears after its plan's cost: the estimated value per farmer minus what the plan costs out of pocket. */
+export function netUsd(expectedValueUsd: number, p: SnapshotProtocol, age: number | null, model: ModelConstants = MODEL): number {
+  return valuePerUserUsd(expectedValueUsd, p, model) - planCostUsd(p, age);
+}
+
+/** What the farm clears per hour of work: the net divided by the plan's hours. */
+export function netPerHourUsd(expectedValueUsd: number, p: SnapshotProtocol, age: number | null, model: ModelConstants = MODEL): number {
+  return Math.round((netUsd(expectedValueUsd, p, age, model) / planHours(age)) * 100) / 100;
 }
 
 // --------------------------------------------------------------- farm plans
@@ -1120,7 +1153,7 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with what it costs and
+ * A protocol's farm plan: eight steps, each an action with what it costs and
  * how long it takes. Every figure comes from the protocol's own record
  * (category, chains, TVL, age); no protocol name is ever special-cased. A
  * derivative row's plan says so up front — it farms yield and the parent
@@ -1132,12 +1165,16 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, kind: BoardCl
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const gas = gasUsd(chain);
+  const track = `Set a weekly reminder and a TVL alert for ${p.name} so you notice if its deposits fall sharply or its site changes, and check its official X account once a week for snapshot or points announcements. Cost: $0. Time: 10 minutes to set up, 5 minutes a week.`;
+  const review = `Once a month, review the position: confirm the deposit is still earning, the protocol's TVL has not collapsed, and no migration or new vault has replaced the one you use. Cost: $0. Time: 15 minutes a month.`;
   if (kind === 'derivative') {
     return [
       `Know what this is: ${p.name} is a wrapped, staked or bridged product of a token that already trades, so it has no launch of its own to farm — the plan below earns yield and positions you in the parent token's ecosystem. Cost: $0 to read. Time: 5 minutes.`,
       `${bridgeFor(capital, chain)} Cost: about $${gas} in bridge and gas fees. Time: about 10 minutes.`,
       `${actionFor(p, capital, chain)} Cost: $${capital} of capital and about $${gas} of gas. Time: 15 minutes to set up.`,
+      track,
       `Each week, ${weeklyFor(p)} so the wallet stays active across snapshots. Cost: about $${gas} of gas a week. Time: 10 minutes a week.`,
+      review,
       `Keep the position open for at least ${hold} days; the yield compounds and the parent ecosystem's snapshots reward long-held positions. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
       `There is no token of its own to claim — exit by unwinding the position on the protocol's own site, and never follow a claim link from DMs or ads. Cost: gas for the exit only. Time: 15 minutes.`,
     ];
@@ -1146,7 +1183,9 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, kind: BoardCl
     `Set up a fresh wallet just for this farm and store its seed phrase offline on paper. Cost: $0 to create the wallet. Time: 5 minutes.`,
     `${bridgeFor(capital, chain)} Cost: about $${gas} in bridge and gas fees. Time: about 10 minutes.`,
     `${actionFor(p, capital, chain)} Cost: $${capital} of capital and about $${gas} of gas. Time: 15 minutes to set up.`,
+    track,
     `Each week, ${weeklyFor(p)} so the wallet stays active across snapshots. Cost: about $${gas} of gas a week. Time: 10 minutes a week.`,
+    review,
     `Keep the position open for at least ${hold} days; airdrop snapshots usually reward wallets active across several months. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
     `When a token is announced, claim only from the link the protocol publishes on its own site or X account — never from DMs or ads. Cost: gas for the claim only. Time: 15 minutes.`,
   ];
@@ -1208,6 +1247,9 @@ export function buildBoard(
     verdict: farmVerdict(s.expected, s.p, s.age, model),
     value_per_user_usd: valuePerUserUsd(s.expected, s.p, model),
     plan_cost_usd: planCostUsd(s.p, s.age),
+    plan_hours: planHours(s.age),
+    net_usd: Math.round(netUsd(s.expected, s.p, s.age, model)),
+    net_per_hour_usd: netPerHourUsd(s.expected, s.p, s.age, model),
     farmer_count: farmerCountFor(s.p),
     model: {
       size_multiple: s.sizeMult,
@@ -1286,6 +1328,9 @@ export function radarRow(row: BoardRow): RadarRow {
     verdict: row.verdict,
     value_per_user_usd: row.value_per_user_usd,
     plan_cost_usd: row.plan_cost_usd,
+    plan_hours: row.plan_hours,
+    net_usd: row.net_usd,
+    net_per_hour_usd: row.net_per_hour_usd,
     farmer_count: row.farmer_count,
     on_watchlist: row.on_watchlist,
     size_multiple: row.model.size_multiple,
@@ -1311,6 +1356,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    seal: boardSeal(board),
     calibration,
     odds_fit: oddsFitInfo(oddsFit, design, model),
     odds_validation: validation,
@@ -1391,6 +1437,50 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
     }
   }
   return null;
+}
+
+/**
+ * A checksum of the board: FNV-1a over rank, slug and expected value, as
+ * eight hex digits. The dashboard recomputes it in the browser from the
+ * same rows and the integrity strip shows both, so a reader can see the
+ * table they are looking at is the board this program wrote.
+ */
+export function boardSeal(board: BoardRow[]): string {
+  let h = 0x811c9dc5;
+  for (const r of board) {
+    const s = `${r.rank}:${r.slug}:${r.implied_value_usd};`;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+/**
+ * The snapshot as one compact script for the dashboard: SN holds every
+ * protocol as [tvl, mcap, category index into CATS, age in days, 7-day
+ * change], sorted by slug. The class is folded into the other fields so
+ * the script stays small: a derivative negates its category index (a null
+ * category is -100, or -101 for a derivative), a token on record with no
+ * cap stores mcap -1, an unlisted protocol stores age -1. TVL and market
+ * cap are exact integers — the board's tightest adjacent gap is under
+ * 0.01%, so a rounded copy could flip two ranks and the in-browser refit
+ * would no longer match this program's. model.js decodes it and fits on
+ * it in the browser, from the sealed snapshot, each run.
+ */
+export function compactSnapshotScript(snapshot: Snapshot): string {
+  const categories = [...new Set(snapshot.protocols.map((p) => p.category).filter((c): c is string => c !== null))].sort();
+  const catIdx = new Map(categories.map((c, i) => [c, i]));
+  const ordered = [...snapshot.protocols].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const rows = ordered.map((p) => {
+    const cls = !isPreToken(p) ? 2 : isRankable(p) ? 0 : 1;
+    const cat = p.category === null ? (cls === 1 ? -101 : -100) : cls === 1 ? -(catIdx.get(p.category)! + 1) : catIdx.get(p.category)!;
+    const mcap = cls === 2 && (p.mcap_usd ?? 0) === 0 ? -1 : (p.mcap_usd ?? 0);
+    return [p.tvl_usd, mcap, cat, ageDays(snapshot.as_of, p.listed_at) ?? -1, p.change_7d];
+  });
+  const lines = rows.map((r) => JSON.stringify(r)).join(',\n');
+  return `// The sealed snapshot, compact: SN is every protocol as [tvl, mcap, category index into CATS, age in days, change_7d]. Sorted by slug. The class is folded in: a derivative negates its category index (null category is -100, or -101 for a derivative), a token on record with no cap stores mcap -1, an unlisted protocol stores age -1. model.js decodes it and fits on it in the browser. One protocol per line, so the dossier shows whole rows.\nconst CATS=${JSON.stringify(categories)};\nconst SN=[\n${lines}\n];\n`;
 }
 
 /** The dashboard's dataset as one script: window.RADAR, no fetch and no network. */

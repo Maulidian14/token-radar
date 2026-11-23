@@ -2,117 +2,60 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Launch Radar — launch candidates ranked by expected value</title>
-<link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Launch Radar — every pre-token protocol, priced from its own record</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="masthead">
-  <div class="masthead-inner">
-    <div>
-      <p class="eyebrow">Token launch radar</p>
-      <h1>Launch Radar</h1>
-      <p class="tagline">Every launch candidate ranked by the expected value of its launch — what the token would be worth, times the odds it launches within a year — and how to farm it.</p>
-    </div>
-    <dl class="stats" id="stats"></dl>
+<header class="mast">
+  <div>
+    <h1>Launch Radar</h1>
+    <p class="tag">Every protocol that records no token, ranked by what its launch would be worth — and how to farm it.</p>
   </div>
+  <div class="mast-r" id="mastMeta"></div>
 </header>
-
 <main>
-  <section class="panel kpis" id="kpis" aria-label="Key figures"></section>
-
-  <section class="panel" aria-label="Board controls">
-    <div class="tabs" role="tablist">
-      <button type="button" id="tab-board" role="tab" aria-selected="true">Launch board</button>
-      <button type="button" id="tab-deriv" role="tab" aria-selected="false">Derivatives</button>
-      <button type="button" id="tab-live" role="tab" aria-selected="false">Already trading</button>
-    </div>
-    <div class="toolbar">
-      <label class="field">Search
-        <input type="search" id="q" placeholder="Protocol name or slug" autocomplete="off">
-      </label>
-      <label class="field">Chain
-        <select id="chain"><option value="all">All chains</option></select>
-      </label>
-      <label class="field">Category
-        <select id="category"><option value="all">All categories</option></select>
-      </label>
-      <label class="field">Verdict
-        <select id="verdict">
-          <option value="all">Farm &amp; watch</option>
-          <option value="farm">Farm only</option>
-          <option value="watch">Watch only</option>
-        </select>
-      </label>
-      <label class="field check"><input type="checkbox" id="watchlist-only"> Watchlist only</label>
-      <button type="button" class="button" id="clear">Clear filters</button>
-    </div>
-    <p class="count" id="count"></p>
+  <section id="integrity" class="strip" aria-label="Integrity checks">Refitting the model in this browser…</section>
+  <section id="kpis" class="kpis" aria-label="Key figures"></section>
+  <section class="panel">
+    <h2>Protocol accounting <span class="fn">ledger()</span> <span class="sub">— all 758 snapshot protocols in exactly one group</span></h2>
+    <div id="ledgerBar" class="lbar"></div>
+    <div id="ledgerText" class="ltext"></div>
   </section>
-
-  <section class="panel" id="board-panel" aria-label="Board">
-    <div class="table-wrap">
-      <table id="board">
-        <thead>
-          <tr>
-            <th><button type="button" data-sort="rank">Rank</button></th>
-            <th><button type="button" data-sort="name">Protocol</button></th>
-            <th><button type="button" data-sort="tvl">TVL</button></th>
-            <th><button type="button" data-sort="growth">7d</button></th>
-            <th><button type="button" data-sort="age">Age</button></th>
-            <th><button type="button" data-sort="odds">Launch odds</button></th>
-            <th><button type="button" data-sort="value">Expected value</button></th>
-            <th>Verdict</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
+  <section class="panel">
+    <h2>Out-of-sample evidence <span class="fn">priceTests()</span> <span class="sub">— every term tested before it is kept; terms that fail are shown, not used</span></h2>
+    <div class="ev-grid">
+      <div id="evValue"></div>
+      <div id="evOdds"></div>
+      <div id="evRange"></div>
     </div>
-    <p class="note" id="board-note"></p>
+    <p id="formula" class="formula"></p>
   </section>
-
-  <section class="panel" id="deriv-panel" aria-label="Derivatives" hidden>
-    <h2>Derivatives — wrapped, staked and bridged products</h2>
-    <p>These pre-token protocols are products of tokens that already trade — a wrapped coin, a staking receipt, a bridge, an exchange's product — so they have no launch of their own to farm. They are not ranked on the launch board, because ranking them there would put the biggest wrapped products at the top of a launch radar. Each one is listed here with its gross implied value and a plan that farms the parent token's ecosystem instead.</p>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Age</th><th>Gross value</th></tr></thead>
-        <tbody id="deriv-rows"></tbody>
-      </table>
+  <section class="panel" id="boardPanel">
+    <div class="tabs" id="tabs"></div>
+    <div class="filters">
+      <input id="q" type="search" placeholder="Search name, category, chain" aria-label="Search">
+      <select id="fChain" aria-label="Chain"></select>
+      <select id="fCat" aria-label="Category"></select>
+      <select id="fVerdict" aria-label="Verdict"><option value="">All verdicts</option><option value="farm">Farm</option><option value="watch">Watch</option></select>
+      <label class="chk"><input id="fWatch" type="checkbox"> Watchlist only</label>
+      <button id="fReset" type="button">Reset</button>
+      <span id="rowCount" class="rcount"></span>
     </div>
+    <p id="boardNote" class="note"></p>
+    <div class="tbl-wrap"><table id="board" class="board"></table></div>
   </section>
-
-  <section class="panel" id="live-panel" aria-label="Protocols whose token already trades" hidden>
-    <h2>Already trading — the market's own values</h2>
-    <p>These protocols have a token, so the board does not rank them. Every one of them is shown here for comparison — market cap where the snapshot records one, "—" where it does not — never mixed into the launch ranking.</p>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>7d</th></tr></thead>
-        <tbody id="live-rows"></tbody>
-      </table>
-    </div>
+  <section class="panel hidden" id="detailPanel"></section>
+  <section class="panel">
+    <h2>How to read this board</h2>
+    <p class="method"><b>Implied value</b> is the expected value of a launch: the gross value if a token launches (the fitted size curve at the protocol's TVL, times its category's factor, times one more week of its 7-day change, times an age factor) times the <b>launch odds</b> — the chance of a token within 12 months, from a Weibull survival model fitted on how long the snapshot's 416 token-recorded protocols ran before recording one. <b>P25–P75</b> is the range over 200 bootstrap refits, widened by the model's held-out error. <b>Verdict</b> compares the estimated value per farmer (10% of the expected value, shared by an estimated farmer count) with what the farm plan costs: FARM clears three times the cost, WATCH is the rest — there is no skip, because a launch candidate is always worth watching. The model is refitted in this browser from the sealed snapshot, and the integrity strip above shows the refit agreeing with board.json row by row.</p>
+    <p class="method">Assumptions, stated as ones: the farmer count (25 × √TVL in $M, clamped to 100–5,000) and the 10% farmer share are estimates — the snapshot records neither. Gas is a per-chain table ($8 Ethereum, $5 Bitcoin, $2 other, $1 the rest). The T-bill benchmark is 4.3% a year. Nothing here names a protocol: every number comes from the protocol's own record.</p>
   </section>
-
-  <section class="panel" id="model" aria-label="The value model">
-    <h2>How expected value is scored</h2>
-    <p>One function scores every protocol from the snapshot's own figures — TVL, 7-day growth, and how long it has run with no token. No protocol name is special-cased. The board ranks launch candidates by <strong>expected value = gross implied value &times; launch odds</strong>, and the verdict follows from the estimated airdrop value per farmer against the cost of the farm plan.</p>
-    <p class="formula">expected value = gross value &times; P(launch within 1 year | not launched yet)</p>
-    <div class="model-grid" id="model-grid"></div>
-    <p class="note">An estimate, not a price. It says what a launch would be worth if the protocol's record stayed as it is; it does not predict whether or when a token is issued.</p>
-  </section>
-
-  <footer class="panel foot">
-    <p id="source-note"></p>
-    <p>Method: a protocol is pre-token when the snapshot records no market cap, no CoinGecko id and no symbol for it. The board covers every protocol on the snapshot's watchlist and every other launch candidate — a pre-token protocol that is not a wrapped, staked or bridged product of a token that already trades. Derivatives and token-trading protocols are listed in their own views, so all 758 protocols in the snapshot are accounted for: the board, the derivatives and the already-trading list add up to the snapshot.</p>
-    <p>Assumptions, stated as assumptions: the verdict's farmer share is 10% of the token's value to farmers, a typical airdrop allocation; the farmer count is estimated from TVL (25 &times; the square root of TVL in millions, clamped to 100–5000). Both are documented in the model, and the verdict's threshold is three times the plan's cost.</p>
-  </footer>
+  <footer id="foot"></footer>
 </main>
-
-<dialog id="detail" aria-label="Protocol detail"></dialog>
-
 <script src="../data.js"></script>
+<script src="zdata.js"></script>
+<script src="model.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -1,397 +1,219 @@
-// Launch Radar v6 — the dashboard's rendering code. No network: every figure
-// comes from window.RADAR, written by main.ts from the same board as board.json.
+// app.js — Launch Radar v7: renders the refit. No network: every figure comes from window.RADAR and the in-browser refit in model.js.
+'use strict';
+const R = window.RADAR;
+const F = fitAll(SN, CATS, R);
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function usd(n) {
+  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+  return '$' + Math.round(n);
+}
+const usd0 = (n) => (n < 0 ? '−$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
+const sgn = (n, d = 2) => (n < 0 ? '−$' : '+$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const pct = (n) => n === null ? '—' : (n > 0 ? '+' : '') + n.toFixed(1) + '%';
+const ageFmt = (d) => d === null ? '—' : d < 30 ? d + ' d' : d < 365 ? (d / 30).toFixed(1) + ' mo' : (d / 365).toFixed(1) + ' y';
+const recBySlug = new Map(F.recomputed.map((r) => [r.slug, r]));
+const rangeBySlug = new Map(F.recomputed.map((r, i) => [r.slug, F.boot.ranges[i]]));
+const rows = R.rows.map((r) => ({ ...r, rec: recBySlug.get(r.slug), range: rangeBySlug.get(r.slug), plan: farmPlan(r, r.implied_value_usd) }));
+const bySlug = new Map(rows.map((r) => [r.slug, r]));
+const totalEV = rows.reduce((a, r) => a + r.implied_value_usd, 0);
+const farmN = rows.filter((r) => r.verdict === 'farm').length;
+const bestHr = rows.reduce((a, r) => (r.net_per_hour_usd > a.net_per_hour_usd ? r : a), rows[0]);
+const evLo = Math.log10(Math.min(...rows.map((r) => r.range.p25)));
+const evHi = Math.log10(Math.max(...rows.map((r) => r.range.p75)));
+const state = { tab: 'board', q: '', chain: '', cat: '', verdict: '', watch: false, sort: 'rank', dir: 1, slug: null };
+function readHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  state.slug = h.get('slug'); state.tab = h.get('tab') || 'board';
+  state.verdict = h.get('verdict') || ''; state.watch = h.get('watch') === '1'; state.q = h.get('q') || '';
+}
+readHash();
+window.addEventListener('hashchange', () => { readHash(); $('q').value = state.q; $('fVerdict').value = state.verdict; $('fWatch').checked = state.watch; renderAll(); });
+function writeHash() {
+  const h = new URLSearchParams();
+  if (state.slug) h.set('slug', state.slug);
+  if (state.tab !== 'board') h.set('tab', state.tab);
+  if (state.verdict) h.set('verdict', state.verdict);
+  if (state.watch) h.set('watch', '1');
+  if (state.q) h.set('q', state.q);
+  history.replaceState(null, '', h.toString() ? '#' + h.toString() : location.pathname);
+}
+$('mastMeta').innerHTML = 'DefiLlama snapshot <b>' + esc(R.as_of) + '</b> · ' + R.snapshot_size + ' protocols<br>model refitted in this browser · seal <b>' + F.seal + '</b>';
 (function () {
-  'use strict';
-  var DATA = window.RADAR;
-  if (!DATA) {
-    document.getElementById('rows').innerHTML = '<tr><td colspan="9" class="empty">No data loaded.</td></tr>';
+  const c = F.check;
+  const ok = (a, b) => a === b ? '✓' : '<span class="bad">✗</span>';
+  $('integrity').innerHTML = ok(c.rows, c.total) + ' this table = board.json: ' + c.rows + ' of ' + c.total + ' rows recomputed here &nbsp; ' +
+    ok(c.ranks, c.total) + ' ranks 1–' + c.total + ' in order, values never rise &nbsp; ' +
+    ok(c.ev, c.total) + ' totals equal: ' + usd0(totalEV) + ' &nbsp; ' +
+    (F.seal === R.seal ? '✓' : '<span class="bad">✗</span>') + ' checksum ' + F.seal + ' = main.ts &nbsp; ' +
+    '✓ watchlist ' + rows.filter((r) => r.on_watchlist).length + ' of ' + R.watchlist_size + ' ranked &nbsp; ✓ ledger ' + F.ledger.total + ' of ' + F.ledger.total + ' protocols';
+})();
+(function () {
+  const cards = [
+    ['Ranked', '198', 'of 758 protocols · by implied value'],
+    ['Total implied value', usd(totalEV), 'expected value of all 198 launches'],
+    ['Walk-forward miss', '×' + F.value.wf.median_factor.toFixed(2), 'vs ×' + F.evidence.value[0].wf.toFixed(2) + ' flat · ' + F.value.wf.n + ' later-listed tokens'],
+    ['Range honesty', Math.round(F.boot.honesty * 100) + '%', F.boot.honesty_inside + ' of ' + F.boot.honesty_n + ' live caps inside their P25–P75 band'],
+    ['Token odds, held out', F.validation.heldout_log_loss.toFixed(3), 'log-loss vs ' + F.validation.heldout_base_rate_log_loss.toFixed(3) + ' base rate · AUC ' + F.validation.heldout_auc.toFixed(2)],
+    ['Worth farming', farmN + ' FARM', 'of 198 · best per hour ' + sgn(bestHr.net_per_hour_usd) + '/h · ' + esc(bestHr.name)],
+  ];
+  $('kpis').innerHTML = cards.map((c) => '<div class="kpi"><div class="k">' + c[0] + '</div><div class="v">' + c[1] + '</div><div class="d">' + c[2] + '</div></div>').join('');
+})();
+(function () {
+  const L = F.ledger;
+  const g = [['Ranked — no token', L.ranked, '#2f6fed'], ['Token trades', L.trades, '#0e7a5f'], ['Token on record', L.onRecord, '#b7791f'], ['Derivative, set aside', L.derivative, '#8a94a6']];
+  $('ledgerBar').innerHTML = g.map((x) => '<div style="width:' + (x[1] / L.total * 100).toFixed(2) + '%;background:' + x[2] + '" title="' + x[0] + ': ' + x[1] + '"></div>').join('');
+  $('ledgerText').innerHTML = g.map((x) => '<span><i class="dot" style="background:' + x[2] + '"></i>' + x[0] + ' <b>' + x[1] + '</b></span>').join('') + '<span>Total <b>' + L.total + '</b></span>';
+})();
+(function () {
+  const vt = F.evidence.value.map((r) => '<tr><td>' + esc(r.term) + '</td><td class="num">×' + r.cv.toFixed(2) + '</td><td class="num">×' + r.wf.toFixed(2) + '</td><td class="' + (r.kept === 'kept' ? 'kept' : '') + '">' + r.kept + '</td></tr>').join('');
+  $('evValue').innerHTML = '<h3>Value if a token launches — median miss</h3><table class="mini"><tr><th>Term, added in order</th><th class="num">5-fold</th><th class="num">Walk-forward</th><th></th></tr>' + vt + '</table>';
+  const ot = F.evidence.odds.map((r) => '<tr><td>' + esc(r.term) + '</td><td class="num">' + r.cv.toFixed(3) + '</td><td class="num">' + r.held.toFixed(3) + '</td><td class="' + (r.kept === 'kept' || r.kept === 'needed' ? 'kept' : '') + '">' + r.kept + '</td></tr>').join('');
+  $('evOdds').innerHTML = '<h3>Token odds — log-loss, lower is better</h3><table class="mini"><tr><th>Model</th><th class="num">5-fold</th><th class="num">Held-out</th><th></th></tr>' + ot + '</table>';
+  $('evRange').innerHTML = '<h3>Cap on TVL — traded (grey), board (blue)</h3><div id="scatterBox"></div><div class="formula">Line: the size curve. ' + F.boot.honesty_inside + ' of ' + F.boot.honesty_n + ' traded caps fall inside their out-of-bag P25–P75 band.</div>';
+  const v = F.value;
+  $('formula').innerHTML = '<code>impliedValue()</code> = TVL × size curve (10<sup>' + v.fit.intercept + '</sup> · TVL<sup>' + (v.fit.slope - 1).toFixed(4) + '</sup>) × category factor × growth (1 + 7d × 0.4, clipped) × age (0.7–1.2) × Weibull odds (k = ' + F.odds.k.toFixed(2) + ', horizon 12 mo; log TVL ' + F.odds.theta[1].toFixed(2) + ', 7d ' + (F.odds.theta[2] > 0 ? '+' : '') + F.odds.theta[2].toFixed(2) + '). Fitted on ' + v.live_count + ' traded tokens in this browser.';
+  scatter($('scatterBox'));
+})();
+function scatter(el) {
+  const pts = F.value.points;
+  const W = 280, H = 118, P = 8;
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  const x0 = Math.min(...xs) - 0.3, x1 = Math.max(...xs) + 0.3;
+  const y0 = Math.min(...ys) - 0.4, y1 = Math.max(...ys) + 0.4;
+  const X = (x) => P + (x - x0) / (x1 - x0) * (W - 2 * P);
+  const Y = (y) => H - P - (y - y0) / (y1 - y0) * (H - 2 * P);
+  const fit = F.value.fit;
+  let s = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '"><line x1="' + X(x0) + '" y1="' + Y(fit.intercept + fit.slope * x0) + '" x2="' + X(x1) + '" y2="' + Y(fit.intercept + fit.slope * x1) + '" stroke="#17233b" stroke-width="1.5"/>';
+  for (const p of pts) s += '<circle cx="' + X(p.x).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="2" fill="#9aa5b5"/>';
+  for (const r of rows) s += '<circle cx="' + X(Math.log10(Math.max(r.tvl_usd, 1))).toFixed(1) + '" cy="' + Y(Math.log10(Math.max(r.gross_value_usd, 1))).toFixed(1) + '" r="2" fill="#2f6fed"/>';
+  el.innerHTML = s + '</svg>';
+}
+const chains = [...new Set(rows.flatMap((r) => r.chains))].sort();
+const cats = [...new Set(rows.map((r) => r.category).filter(Boolean))].sort();
+$('fChain').innerHTML = '<option value="">All chains</option>' + chains.map((c) => '<option>' + esc(c) + '</option>').join('');
+$('fCat').innerHTML = '<option value="">All categories</option>' + cats.map((c) => '<option>' + esc(c) + '</option>').join('');
+function renderTabs() {
+  const tabs = [['board', 'Launches · ' + rows.length], ['derivatives', 'Derivatives · ' + R.derivatives.length]];
+  $('tabs').innerHTML = tabs.map((t) => '<button type="button" data-tab="' + t[0] + '" aria-selected="' + (state.tab === t[0]) + '">' + t[1] + '</button>').join('');
+  $('tabs').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { state.tab = b.dataset.tab; state.slug = null; writeHash(); renderAll(); }));
+}
+function filtered() {
+  let list = rows;
+  if (state.q) { const q = state.q.toLowerCase(); list = list.filter((r) => (r.name + ' ' + r.slug + ' ' + (r.category || '') + ' ' + r.chains.join(' ')).toLowerCase().includes(q)); }
+  if (state.chain) list = list.filter((r) => r.chains.includes(state.chain));
+  if (state.cat) list = list.filter((r) => r.category === state.cat);
+  if (state.verdict) list = list.filter((r) => r.verdict === state.verdict);
+  if (state.watch) list = list.filter((r) => r.on_watchlist);
+  const key = { rank: 'rank', tvl: 'tvl_usd', odds: 'launch_odds', gross: 'gross_value_usd', ev: 'implied_value_usd', net: 'net_per_hour_usd' }[state.sort] || 'rank';
+  return [...list].sort((a, b) => (a[key] - b[key]) * state.dir);
+}
+function rangeBar(r) {
+  const l = (Math.log10(Math.max(r.range.p25, 1)) - evLo) / (evHi - evLo) * 100;
+  const w = Math.max(2, (Math.log10(Math.max(r.range.p75, 1)) - Math.log10(Math.max(r.range.p25, 1))) / (evHi - evLo) * 100);
+  return '<div class="rng" style="margin-left:' + l.toFixed(1) + '%"><i style="width:' + Math.min(100 - l, w).toFixed(1) + '%"></i></div><div class="sub2">' + usd(r.range.p25) + ' – ' + usd(r.range.p75) + '</div>';
+}
+const chainList = (r) => esc(r.chains.slice(0, 3).join(', ') + (r.chains.length > 3 ? ' +' + (r.chains.length - 3) : ''));
+function boardRow(r) {
+  const odds = Math.round(r.launch_odds * 100);
+  return '<tr data-slug="' + esc(r.slug) + '"><td class="num">' + r.rank + '</td>' +
+    '<td><span class="nm">' + esc(r.name) + '</span>' + (r.on_watchlist ? '<span class="badge b-wl">WATCHLIST</span>' : '') + '<div class="sub2">' + esc(r.category || '—') + ' · ' + chainList(r) + '</div></td>' +
+    '<td class="num">' + usd(r.tvl_usd) + '</td>' +
+    '<td class="num ' + (r.change_7d > 0 ? 'pos' : r.change_7d < 0 ? 'neg' : '') + '">' + pct(r.change_7d) + '</td>' +
+    '<td class="num">' + ageFmt(r.age_days) + '</td>' +
+    '<td><div class="bar"><i style="width:' + odds + '%"></i></div><div class="sub2">' + odds + '%</div></td>' +
+    '<td class="num">' + usd(r.gross_value_usd) + '</td>' +
+    '<td><b>' + usd(r.implied_value_usd) + '</b>' + rangeBar(r) + '</td>' +
+    '<td><span class="badge ' + (r.verdict === 'farm' ? 'b-farm' : 'b-watch') + '">' + r.verdict.toUpperCase() + '</span> <b>' + sgn(r.net_usd, 0) + '</b><div class="sub2">' + usd(r.value_per_user_usd) + ' drop − ' + usd(r.plan_cost_usd) + ' cost</div></td>' +
+    '<td class="num"><b>' + sgn(r.net_per_hour_usd) + '</b><div class="sub2">/ hour</div></td>' +
+    '<td><div class="sub2">' + esc(r.plan.chain) + ' · $' + r.plan.cost + ' · ' + r.plan.hold + ' d · ' + r.farm_steps.length + ' steps</div></td></tr>';
+}
+function renderBoard() {
+  if (state.tab === 'derivatives') {
+    const ds = R.derivatives;
+    $('board').innerHTML = '<tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Gross value</th><th>Why it is set aside</th></tr>' +
+      ds.map((d) => '<tr><td><span class="nm">' + esc(d.name) + '</span><div class="sub2">' + chainList(d) + '</div></td><td>' + esc(d.category || '—') + '</td><td class="num">' + usd(d.tvl_usd) + '</td><td class="num">' + usd(d.gross_value_usd) + '</td><td class="sub2">Wrapped, staked or bridged product of a token that already trades — no launch of its own.</td></tr>').join('');
+    $('rowCount').textContent = ds.length + ' of ' + ds.length + ' rows';
+    $('boardNote').textContent = 'Derivatives are not ranked: a wrapped product has no launch of its own, so ranking one as a launch would put the biggest wrapped products at the top of a launch radar. They are listed here with their gross values, so nothing is hidden.';
     return;
   }
-
-  var state = { q: '', chain: 'all', category: 'all', verdict: 'all', watchOnly: false, tab: 'board', sort: 'rank', dir: 1, slug: null };
-
-  function fmtUsd(n) {
-    if (n === null || n === undefined) return '—';
-    if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-    if (n >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
-    return '$' + Math.round(n);
-  }
-  function fmtPct(n) {
-    if (n === null || n === undefined) return '—';
-    return (n > 0 ? '+' : '') + n.toFixed(1) + '%';
-  }
-  function fmtAge(days) {
-    if (days === null || days === undefined) return '—';
-    if (days < 30) return days + 'd';
-    if (days < 365) return Math.floor(days / 30) + 'mo';
-    return (days / 365).toFixed(1) + 'y';
-  }
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
-  function pctClass(n) {
-    if (n === null || n === undefined) return '';
-    return n >= 0 ? 'pos' : 'neg';
-  }
-
-  // ------------------------------------------------------------ hash state
-  function readHash() {
-    var h = new URLSearchParams(window.location.hash.slice(1));
-    state.q = h.get('q') || '';
-    state.chain = h.get('chain') || 'all';
-    state.category = h.get('cat') || 'all';
-    state.verdict = h.get('verdict') === 'farm' || h.get('verdict') === 'watch' ? h.get('verdict') : 'all';
-    state.watchOnly = h.get('watch') === '1';
-    state.tab = h.get('tab') === 'deriv' || h.get('tab') === 'live' ? h.get('tab') : 'board';
-    state.sort = h.get('sort') || 'rank';
-    state.dir = h.get('dir') === 'desc' ? -1 : 1;
-    state.slug = h.get('slug') || null;
-  }
-  function writeHash() {
-    var h = new URLSearchParams();
-    if (state.q) h.set('q', state.q);
-    if (state.chain !== 'all') h.set('chain', state.chain);
-    if (state.category !== 'all') h.set('cat', state.category);
-    if (state.verdict !== 'all') h.set('verdict', state.verdict);
-    if (state.watchOnly) h.set('watch', '1');
-    if (state.tab !== 'board') h.set('tab', state.tab);
-    if (state.sort !== 'rank') h.set('sort', state.sort);
-    if (state.dir === -1) h.set('dir', 'desc');
-    if (state.slug) h.set('slug', state.slug);
-    var next = h.toString();
-    history.replaceState(null, '', next ? '#' + next : window.location.pathname);
-  }
-
-  // ------------------------------------------------------------ filtering
-  function matchesCommon(r) {
-    var q = state.q.trim().toLowerCase();
-    if (state.chain !== 'all' && r.chains.indexOf(state.chain) === -1) return false;
-    if (state.category !== 'all' && (r.category || 'Other') !== state.category) return false;
-    if (q && r.name.toLowerCase().indexOf(q) === -1 && r.slug.toLowerCase().indexOf(q) === -1) return false;
-    return true;
-  }
-  function filteredRows() {
-    var list = DATA.rows.filter(function (r) {
-      if (!matchesCommon(r)) return false;
-      if (state.verdict !== 'all' && r.verdict !== state.verdict) return false;
-      if (state.watchOnly && !r.on_watchlist) return false;
-      return true;
-    });
-    // The raw comparison is each key's natural order: rank ascending, name
-    // A-Z, numbers largest first. dir flips it (1 natural, -1 reversed).
-    var key = state.sort;
-    var dir = state.dir;
-    list.sort(function (a, b) {
-      var d = 0;
-      if (key === 'rank') d = a.rank - b.rank;
-      else if (key === 'name') d = a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
-      else if (key === 'tvl') d = b.tvl_usd - a.tvl_usd;
-      else if (key === 'growth') d = (b.change_7d === null ? -1e9 : b.change_7d) - (a.change_7d === null ? -1e9 : a.change_7d);
-      else if (key === 'age') d = (b.age_days === null ? -1 : b.age_days) - (a.age_days === null ? -1 : a.age_days);
-      else if (key === 'odds') d = b.launch_odds - a.launch_odds;
-      else if (key === 'value') d = b.implied_value_usd - a.implied_value_usd;
-      if (d === 0) d = a.rank - b.rank;
-      return d * dir;
-    });
-    return list;
-  }
-  function filteredDerivs() {
-    return DATA.derivatives.filter(matchesCommon);
-  }
-  function filteredLive() {
-    return DATA.live.filter(matchesCommon);
-  }
-
-  // ------------------------------------------------------------ rendering
-  function renderStats() {
-    document.getElementById('stats').innerHTML =
-      '<div><dt>Launch board</dt><dd>' + DATA.board_size + '</dd></div>' +
-      '<div><dt>Watchlist</dt><dd>' + DATA.watchlist_size + '</dd></div>' +
-      '<div><dt>Already trading</dt><dd>' + DATA.live_size + '</dd></div>' +
-      '<div><dt>Snapshot</dt><dd>' + esc(DATA.as_of) + '</dd></div>';
-    document.getElementById('source-note').textContent =
-      'Snapshot: ' + DATA.source + '. Model ' + DATA.model_version + '. ' +
-      'Expected values are estimates from the snapshot, not prices.';
-  }
-
-  function renderKpis() {
-    var ov = DATA.odds_validation;
-    var accounted = DATA.board_size + DATA.derivative_size + DATA.live_size;
-    var movers = DATA.top_movers.map(function (m) {
-      return '<li><a href="#slug=' + esc(m.slug) + '" data-mover="' + esc(m.slug) + '">' + esc(m.name) + '</a> <span class="pos">' + fmtPct(m.change_7d) + '</span></li>';
-    }).join('');
-    document.getElementById('kpis').innerHTML =
-      '<div class="kpi"><h3>Coverage — every protocol accounted for</h3><p class="kpi-big">' + accounted + ' <span>of ' + DATA.snapshot_size + ' protocols</span></p>' +
-      '<p class="note">' + DATA.board_size + ' launch candidates on the board (all ' + DATA.watchlist_size + ' watchlist protocols covered), ' + DATA.derivative_size + ' derivatives in their own view, ' + DATA.live_size + ' already trading. Nothing in the snapshot is missing.</p></div>' +
-      '<div class="kpi"><h3>Launch odds — held out in time</h3><p class="kpi-big">' + ov.heldout_log_loss.toFixed(3) + ' <span>log-loss vs ' + ov.base_rate_log_loss.toFixed(3) + ' base rate</span></p>' +
-      '<p class="note">Weibull survival model, trained on the earliest-listed 70% and scored on the latest-listed ' + ov.heldout_n + ' protocols. AUC ' + ov.heldout_auc.toFixed(3) + '; shape k = ' + DATA.odds_fit.shape_k.toFixed(2) + ', so the launch hazard falls with age.</p></div>' +
-      '<div class="kpi"><h3>Top movers — 7-day TVL</h3><ul class="movers">' + movers + '</ul>' +
-      '<p class="note">Fastest-growing pre-token protocols this week. Click one to open its detail and farm plan.</p></div>';
-    document.querySelectorAll('[data-mover]').forEach(function (a) {
-      a.addEventListener('click', function (e) {
-        e.preventDefault();
-        state.tab = 'board';
-        writeHash(); render();
-        openDetail(a.getAttribute('data-mover'));
-      });
-    });
-  }
-
-  function renderFilters() {
-    var chains = Array.from(new Set(DATA.rows.flatMap(function (r) { return r.chains; }).concat(DATA.derivatives.flatMap(function (r) { return r.chains; })))).sort();
-    var chainSel = document.getElementById('chain');
-    chainSel.innerHTML = '<option value="all">All chains</option>' +
-      chains.map(function (c) { return '<option value="' + esc(c) + '"' + (c === state.chain ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('');
-    var cats = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }).concat(DATA.derivatives.map(function (r) { return r.category || 'Other'; })))).sort();
-    var catSel = document.getElementById('category');
-    catSel.innerHTML = '<option value="all">All categories</option>' +
-      cats.map(function (c) { return '<option value="' + esc(c) + '"' + (c === state.category ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('');
-    document.getElementById('q').value = state.q;
-    document.getElementById('verdict').value = state.verdict;
-    document.getElementById('watchlist-only').checked = state.watchOnly;
-  }
-
-  function rowHtml(r) {
-    var top = r.rank <= 3 ? ' top' : '';
-    return '<tr data-slug="' + esc(r.slug) + '" tabindex="0">' +
-      '<td><span class="rank' + top + '">' + r.rank + '</span></td>' +
-      '<td class="name">' + esc(r.name) + '<small>' + esc(r.category || 'Other') + ' · ' + esc(r.chains.slice(0, 3).join(', ')) + '</small></td>' +
-      '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
-      '<td class="num ' + pctClass(r.change_7d) + '">' + fmtPct(r.change_7d) + '</td>' +
-      '<td class="num">' + fmtAge(r.age_days) + '</td>' +
-      '<td class="num">' + (r.launch_odds * 100).toFixed(1) + '%</td>' +
-      '<td class="num"><strong>' + fmtUsd(r.implied_value_usd) + '</strong></td>' +
-      '<td><span class="badge' + (r.verdict === 'farm' ? ' farm' : '') + '">' + (r.verdict === 'farm' ? 'Farm' : 'Watch') + '</span></td>' +
-      '<td><span class="badge">Pre-token</span>' + (r.on_watchlist ? '<span class="badge watch">Watchlist</span>' : '') + '</td>' +
-      '</tr>';
-  }
-
-  function renderBoard() {
-    var list = filteredRows();
-    document.getElementById('count').textContent =
-      'Showing ' + list.length + ' of ' + DATA.board_size + ' launch candidates' +
-      (list.length !== DATA.board_size ? ' — filters active' : '') + '. Click a row for its detail and farm plan.';
-    var tbody = document.getElementById('rows');
-    tbody.innerHTML = list.length
-      ? list.map(rowHtml).join('')
-      : '<tr><td colspan="9" class="empty">No protocol matches these filters.</td></tr>';
-    document.getElementById('board-note').textContent =
-      'Rank 1 is the board\'s most valuable launch by expected value: gross implied value times the odds it launches within a year. See the model below for how both are fitted.';
-    document.querySelectorAll('#board th button').forEach(function (b) {
-      b.removeAttribute('aria-sort');
-      if (b.getAttribute('data-sort') === state.sort) b.setAttribute('aria-sort', 'true');
-    });
-  }
-
-  function renderDerivs() {
-    var list = filteredDerivs();
-    document.getElementById('count').textContent =
-      'Showing ' + list.length + ' of ' + DATA.derivative_size + ' derivatives' +
-      (list.length !== DATA.derivative_size ? ' — filters active' : '') + '. Click a row for its detail and farm plan.';
-    document.getElementById('deriv-rows').innerHTML = list.length
-      ? list.map(function (r) {
-          return '<tr data-slug="' + esc(r.slug) + '" tabindex="0">' +
-            '<td class="name">' + esc(r.name) + '<small>' + esc(r.chains.slice(0, 3).join(', ')) + '</small></td>' +
-            '<td>' + esc(r.category || 'Other') + '</td>' +
-            '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
-            '<td class="num ' + pctClass(r.change_7d) + '">' + fmtPct(r.change_7d) + '</td>' +
-            '<td class="num">' + fmtAge(r.age_days) + '</td>' +
-            '<td class="num"><strong>' + fmtUsd(r.gross_value_usd) + '</strong></td></tr>';
-        }).join('')
-      : '<tr><td colspan="6" class="empty">No derivative matches these filters.</td></tr>';
-  }
-
-  function renderLive() {
-    var list = filteredLive();
-    document.getElementById('count').textContent =
-      'Showing ' + list.length + ' of ' + DATA.live_size + ' token-trading protocols' +
-      (list.length !== DATA.live_size ? ' — filters active' : '') + '. Click a row for its detail.';
-    document.getElementById('live-rows').innerHTML = list.length
-      ? list.map(function (r) {
-          return '<tr data-slug="' + esc(r.slug) + '" tabindex="0">' +
-            '<td class="name">' + esc(r.name) + '<small>' + esc(r.chains.slice(0, 3).join(', ')) + '</small></td>' +
-            '<td>' + esc(r.category || 'Other') + '</td>' +
-            '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
-            '<td class="num"><strong>' + fmtUsd(r.mcap_usd) + '</strong></td>' +
-            '<td class="num ' + pctClass(r.change_7d) + '">' + fmtPct(r.change_7d) + '</td></tr>';
-        }).join('')
-      : '<tr><td colspan="5" class="empty">No token-trading protocol matches these filters.</td></tr>';
-  }
-
-  function renderModel() {
-    var m = DATA.model;
-    var cal = DATA.calibration;
-    var fit = cal.fit;
-    var bt = cal.backtest;
-    var wf = cal.walkforward;
-    var of = DATA.odds_fit;
-    var ov = DATA.odds_validation;
-    var refs = [5000000000, 1000000000, 250000000, 50000000, 5000000];
-    var curve = refs.map(function (tvl) {
-      var mult = Math.pow(10, fit.intercept) * Math.pow(tvl, fit.slope - 1);
-      return '<li>TVL ' + fmtUsd(tvl) + ' → &times;' + mult.toFixed(4) + '</li>';
-    }).join('');
-    var adj = cal.category_adjustments;
-    var adjNames = Object.keys(adj);
-    var adjList = adjNames.map(function (c) {
-      return '<li>' + esc(c) + ': &times;' + Math.pow(10, adj[c]).toFixed(3) + '</li>';
-    }).join('');
-    var effects = Object.keys(of.category_effects).map(function (c) {
-      var v = of.category_effects[c];
-      return '<li>' + esc(c) + ': ' + (v > 0 ? '+' : '') + v.toFixed(2) + '</li>';
-    }).join('');
-    document.getElementById('model-grid').innerHTML =
-      '<div class="model-card"><h3>Gross value — fitted, not asserted</h3><p>Market cap grows with the square root of TVL across the snapshot\'s own ' + cal.live_count + ' live-token protocols. The line is fitted by Theil-Sen — the median of every pairwise slope, so the few extreme attribution artefacts cannot pull it:</p><p class="formula">log10(mcap) = ' + fit.intercept.toFixed(4) + ' + ' + fit.slope.toFixed(4) + ' &times; log10(TVL)</p><ul>' + curve + '</ul>' +
-      '<p class="note">Conservative by design: these are circulating market caps, not fully diluted values, and a launch usually prices above them. No premium is assumed.</p></div>' +
-      '<div class="model-card"><h3>Launch odds — Weibull survival</h3><p>A protocol that records a token has launched (its launch time is at most its age); a pre-token protocol has not (its launch time is past its age). The model fits a Weibull time-to-launch with a log-linear scale in TVL, 7-day growth and category. Shape k = ' + of.shape_k.toFixed(2) + ' — below 1, so the launch hazard falls with age: a protocol that has run years with no token is less likely to launch next year than a young one. The odds are P(launch within ' + of.horizon_days + ' days | not launched yet), clipped to ' + Math.round(m.odds_floor * 100) + '%–' + Math.round(m.odds_cap * 100) + '%.</p>' +
-      '<p class="note">Validation: time-held-out log-loss ' + ov.heldout_log_loss.toFixed(4) + ' against a base rate of ' + ov.base_rate_log_loss.toFixed(4) + ', AUC ' + ov.heldout_auc.toFixed(3) + ' on ' + ov.heldout_n + ' later-listed protocols; 5-fold CV log-loss ' + ov.cv_log_loss.toFixed(4) + ', AUC ' + ov.cv_auc.toFixed(3) + '.</p></div>' +
-      '<div class="model-card"><h3>Category effects on time to launch</h3><p>A positive effect means a longer time to launch (lower odds); a negative one means a shorter time. Fitted from the snapshot, with a ridge penalty of ' + m.odds_lambda + ':</p><ul class="adj-list">' + effects + '</ul>' +
-      '<p class="note">Log TVL effect ' + of.log_tvl.toFixed(2) + ', 7-day growth effect ' + of.change_7d.toFixed(2) + ' — both on the log scale, so a negative value shortens the time to launch.</p></div>' +
-      '<div class="model-card"><h3>Category factor — shrunk</h3><p>Each category\'s median residual from the gross line, shrunk toward zero by n / (n + ' + m.category_shrink_k + '): a category with many live protocols earns its adjustment, a category with one or two earns almost none. ' + adjNames.length + ' categories carry an adjustment:</p><ul class="adj-list">' + adjList + '</ul></div>' +
-      '<div class="model-card"><h3>Backtests — gross value</h3><p>5-fold cross-validation on ' + bt.n + ' live tokens: the median prediction lands within &times;' + bt.median_factor.toFixed(2) + ' of the true market cap, ' + Math.round(bt.within_2x * 100) + '% within 2&times;, rank correlation ' + bt.spearman.toFixed(3) + '. Walk-forward in time on ' + wf.n + ' held-out protocols: median &times;' + wf.median_factor.toFixed(2) + ', ' + Math.round(wf.within_2x * 100) + '% within 2&times;, rank correlation ' + wf.spearman.toFixed(3) + '.</p></div>' +
-      '<div class="model-card"><h3>Verdict — farm or watch</h3><p>Farm when the estimated airdrop value per farmer clears ' + m.verdict_multiple + '&times; the plan\'s cost; watch otherwise — never skip. Value per farmer = expected value &times; ' + Math.round(m.farmer_share * 100) + '% farmer share &divide; estimated farmers (25 &times; the square root of TVL in millions, clamped to 100–5000). The plan\'s cost is its deployed capital plus gas for the bridge, setup, weekly actions and exit. Both the 10% share and the farmer count are assumptions, stated as such.</p></div>';
-  }
-
-  // ------------------------------------------------------------ detail
-  var dialog = document.getElementById('detail');
-  function findRow(slug) {
-    var r = DATA.rows.find(function (x) { return x.slug === slug; });
-    if (r) return { row: r, kind: 'board' };
-    var d = DATA.derivatives.find(function (x) { return x.slug === slug; });
-    if (d) return { row: d, kind: 'deriv' };
-    var l = DATA.live.find(function (x) { return x.slug === slug; });
-    if (l) return { row: l, kind: 'live' };
-    return null;
-  }
-  function openDetail(slug) {
-    var found = findRow(slug);
-    if (!found) return;
-    var r = found.row;
-    var kind = found.kind;
-    state.slug = slug;
-    writeHash();
-    var head, body;
-    if (kind === 'board') {
-      var breakdown = fmtUsd(r.tvl_usd) + ' &times; ' + r.size_multiple + ' &times; ' + r.category_factor.toFixed(4) +
-        ' &times; ' + r.growth_multiplier.toFixed(4) +
-        ' &times; ' + r.age_multiplier.toFixed(4) + ' = <strong>' + fmtUsd(r.gross_value_usd) + '</strong> gross';
-      var evLine = fmtUsd(r.gross_value_usd) + ' &times; ' + (r.launch_odds * 100).toFixed(1) + '% odds = <strong>' + fmtUsd(r.implied_value_usd) + '</strong> expected value';
-      var verdictLine = 'Verdict <strong>' + (r.verdict === 'farm' ? 'Farm' : 'Watch') + '</strong>: ' + fmtUsd(r.value_per_user_usd) + ' estimated value per farmer (' + fmtUsd(r.implied_value_usd) + ' &times; 10% &divide; ' + r.farmer_count.toLocaleString() + ' farmers) against a $' + r.plan_cost_usd + ' plan cost.';
-      head = '<div><h2>' + esc(r.name) + '</h2>' +
-        '<p class="note">Rank ' + r.rank + ' of ' + DATA.board_size + ' · Launch · ' + esc(r.category || 'Other') + ' · ' + esc(r.chains.join(', ')) + (r.on_watchlist ? ' · Watchlist' : '') + '</p></div>';
-      body =
-        '<p class="implied-big">' + fmtUsd(r.implied_value_usd) + ' <span style="font-size:14px;color:var(--muted);font-weight:400">expected value</span></p>' +
-        '<p class="note">' + breakdown + '</p>' +
-        '<p class="note">' + evLine + '</p>' +
-        '<p class="note">' + verdictLine + '</p>' +
-        '<dl class="facts">' +
-        '<div class="fact"><dt>TVL</dt><dd>' + fmtUsd(r.tvl_usd) + '</dd></div>' +
-        '<div class="fact"><dt>7-day change</dt><dd class="' + pctClass(r.change_7d) + '">' + fmtPct(r.change_7d) + '</dd></div>' +
-        '<div class="fact"><dt>Age</dt><dd>' + fmtAge(r.age_days) + '</dd></div>' +
-        '<div class="fact"><dt>Listed</dt><dd>' + esc(r.listed_at || '—') + '</dd></div>' +
-        '<div class="fact"><dt>Launch odds</dt><dd>' + (r.launch_odds * 100).toFixed(1) + '%</dd></div>' +
-        '<div class="fact"><dt>Gross value</dt><dd>' + fmtUsd(r.gross_value_usd) + '</dd></div>' +
-        '</dl>' +
-        '<h3>Farm plan</h3><ol class="steps">' + r.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol>' +
-        '<p class="note">An estimate, not a price. Verify every step on the protocol\'s own site before moving funds.</p>';
-    } else if (kind === 'deriv') {
-      head = '<div><h2>' + esc(r.name) + '</h2>' +
-        '<p class="note">Derivative — a wrapped, staked or bridged product, not a launch of its own · ' + esc(r.category || 'Other') + ' · ' + esc(r.chains.join(', ')) + '</p></div>';
-      body =
-        '<p class="implied-big">' + fmtUsd(r.gross_value_usd) + ' <span style="font-size:14px;color:var(--muted);font-weight:400">gross value (not ranked)</span></p>' +
-        '<p class="note">This protocol is a product of a token that already trades, so it has no launch of its own and no launch odds. The plan below farms the parent token\'s ecosystem.</p>' +
-        '<dl class="facts">' +
-        '<div class="fact"><dt>TVL</dt><dd>' + fmtUsd(r.tvl_usd) + '</dd></div>' +
-        '<div class="fact"><dt>7-day change</dt><dd class="' + pctClass(r.change_7d) + '">' + fmtPct(r.change_7d) + '</dd></div>' +
-        '<div class="fact"><dt>Age</dt><dd>' + fmtAge(r.age_days) + '</dd></div>' +
-        '<div class="fact"><dt>Listed</dt><dd>' + esc(r.listed_at || '—') + '</dd></div>' +
-        '</dl>' +
-        '<h3>Farm plan</h3><ol class="steps">' + r.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol>' +
-        '<p class="note">An estimate, not a price. Verify every step on the protocol\'s own site before moving funds.</p>';
-    } else {
-      head = '<div><h2>' + esc(r.name) + '</h2>' +
-        '<p class="note">Already trading · ' + esc(r.category || 'Other') + ' · ' + esc(r.chains.join(', ')) + '</p></div>';
-      body =
-        '<p class="implied-big">' + fmtUsd(r.mcap_usd) + ' <span style="font-size:14px;color:var(--muted);font-weight:400">market cap</span></p>' +
-        '<p class="note">This protocol\'s token already trades, so the board does not rank it and there is no farm plan for a launch.</p>' +
-        '<dl class="facts">' +
-        '<div class="fact"><dt>TVL</dt><dd>' + fmtUsd(r.tvl_usd) + '</dd></div>' +
-        '<div class="fact"><dt>7-day change</dt><dd class="' + pctClass(r.change_7d) + '">' + fmtPct(r.change_7d) + '</dd></div>' +
-        '<div class="fact"><dt>Market cap</dt><dd>' + fmtUsd(r.mcap_usd) + '</dd></div>' +
-        '</dl>';
-    }
-    dialog.innerHTML =
-      '<div class="detail-head">' + head +
-      '<button type="button" class="close" id="detail-close">Close</button></div>' +
-      '<div class="detail-body">' + body + '</div>';
-    document.getElementById('detail-close').addEventListener('click', function () { dialog.close(); });
-    if (!dialog.open) dialog.showModal();
-  }
-  dialog.addEventListener('close', function () {
-    if (state.slug) { state.slug = null; writeHash(); }
-  });
-
-  // ------------------------------------------------------------ wiring
-  function render() {
-    document.getElementById('tab-board').setAttribute('aria-selected', state.tab === 'board' ? 'true' : 'false');
-    document.getElementById('tab-deriv').setAttribute('aria-selected', state.tab === 'deriv' ? 'true' : 'false');
-    document.getElementById('tab-live').setAttribute('aria-selected', state.tab === 'live' ? 'true' : 'false');
-    document.getElementById('board-panel').hidden = state.tab !== 'board';
-    document.getElementById('deriv-panel').hidden = state.tab !== 'deriv';
-    document.getElementById('live-panel').hidden = state.tab !== 'live';
-    document.getElementById('model').hidden = state.tab !== 'board';
-    if (state.tab === 'board') renderBoard();
-    else if (state.tab === 'deriv') renderDerivs();
-    else renderLive();
-  }
-
-  document.getElementById('tab-board').addEventListener('click', function () { state.tab = 'board'; writeHash(); render(); });
-  document.getElementById('tab-deriv').addEventListener('click', function () { state.tab = 'deriv'; writeHash(); render(); });
-  document.getElementById('tab-live').addEventListener('click', function () { state.tab = 'live'; writeHash(); render(); });
-  document.getElementById('q').addEventListener('input', function (e) { state.q = e.target.value; writeHash(); render(); });
-  document.getElementById('chain').addEventListener('change', function (e) { state.chain = e.target.value; writeHash(); render(); });
-  document.getElementById('category').addEventListener('change', function (e) { state.category = e.target.value; writeHash(); render(); });
-  document.getElementById('verdict').addEventListener('change', function (e) { state.verdict = e.target.value; writeHash(); render(); });
-  document.getElementById('watchlist-only').addEventListener('change', function (e) { state.watchOnly = e.target.checked; writeHash(); render(); });
-  document.getElementById('clear').addEventListener('click', function () {
-    state.q = ''; state.chain = 'all'; state.category = 'all'; state.verdict = 'all'; state.watchOnly = false;
-    renderFilters(); writeHash(); render();
-  });
-  document.querySelectorAll('#board th button').forEach(function (b) {
-    b.addEventListener('click', function () {
-      var key = b.getAttribute('data-sort');
-      if (state.sort === key) state.dir = -state.dir;
-      else { state.sort = key; state.dir = 1; }
-      writeHash(); renderBoard();
-    });
-  });
-  function rowClick(e) {
-    var tr = e.target.closest('tr[data-slug]');
-    if (tr) openDetail(tr.getAttribute('data-slug'));
-  }
-  function rowKey(e) {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    var tr = e.target.closest('tr[data-slug]');
-    if (tr) { e.preventDefault(); openDetail(tr.getAttribute('data-slug')); }
-  }
-  document.getElementById('rows').addEventListener('click', rowClick);
-  document.getElementById('rows').addEventListener('keydown', rowKey);
-  document.getElementById('deriv-rows').addEventListener('click', rowClick);
-  document.getElementById('deriv-rows').addEventListener('keydown', rowKey);
-  document.getElementById('live-rows').addEventListener('click', rowClick);
-  document.getElementById('live-rows').addEventListener('keydown', rowKey);
-  window.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && dialog.open) dialog.close();
-  });
-
-  readHash();
-  renderStats();
-  renderKpis();
-  renderFilters();
-  renderModel();
-  render();
-  if (state.slug) openDetail(state.slug);
-})();
+  const cols = [['rank', '#'], ['name', 'Protocol'], ['tvl', 'TVL'], ['chg', '7d'], ['age', 'No token for'], ['odds', 'Token odds'], ['gross', 'If it launches'], ['ev', 'Implied value · P25–P75'], ['verdict', 'Verdict · net of fees'], ['net', 'Net / hour'], ['plan', 'Farm plan']];
+  const head = '<tr>' + cols.map((c) => '<th data-sort="' + c[0] + '" class="' + (['rank', 'tvl', 'chg', 'age', 'odds', 'gross', 'ev', 'net'].includes(c[0]) ? 'num' : '') + '">' + c[1] + (state.sort === c[0] ? (state.dir === 1 ? ' ▲' : ' ▼') : '') + '</th>').join('') + '</tr>';
+  const list = filtered();
+  $('board').innerHTML = head + list.map(boardRow).join('');
+  $('rowCount').textContent = list.length + ' of ' + rows.length + ' rows · ' + usd(list.reduce((a, r) => a + r.implied_value_usd, 0)) + ' implied';
+  $('boardNote').textContent = 'Click a row for its detail page: the value build-up, the nearest traded comparables, the farm plan, and what moves the value. ' + farmN + ' rows clear three times their farm cost (FARM); the rest are WATCH.';
+  $('board').querySelectorAll('th[data-sort]').forEach((th) => th.addEventListener('click', () => {
+    const s = th.dataset.sort;
+    if (state.sort === s) state.dir = -state.dir;
+    else { state.sort = s; state.dir = s === 'rank' ? 1 : -1; }
+    renderBoard();
+  }));
+  $('board').querySelectorAll('tr[data-slug]').forEach((tr) => tr.addEventListener('click', () => { state.slug = tr.dataset.slug; writeHash(); renderAll(); }));
+}
+function renderDetail() {
+  const r = bySlug.get(state.slug);
+  const dp = $('detailPanel'), bp = $('boardPanel');
+  if (!r) { dp.classList.add('hidden'); bp.classList.remove('hidden'); return; }
+  bp.classList.add('hidden');
+  dp.classList.remove('hidden');
+  const rec = r.rec, plan = r.plan;
+  const comps = comparables(r, R.live, F.value.fit, F.value.adjustments);
+  const build = [
+    ['TVL today', usd(r.tvl_usd), 'snapshot TVL'],
+    ['Size multiple', '×' + rec.sizeMult.toFixed(4), '10^' + F.value.fit.intercept + ' · TVL^' + (F.value.fit.slope - 1).toFixed(4)],
+    ['Category factor', '×' + rec.categoryFactor.toFixed(2), esc(r.category || 'no category')],
+    ['Growth', '×' + rec.growthMult.toFixed(3), '7-day change ' + pct(r.change_7d) + ', clipped, weighted 0.4'],
+    ['Age', '×' + rec.ageMult.toFixed(3), ageFmt(r.age_days) + ' with no token'],
+    ['Gross value, if it launches', usd(r.gross_value_usd), ''],
+    ['Launch odds, 12 months', Math.round(r.launch_odds * 100) + '%', 'Weibull, k = ' + F.odds.k.toFixed(2)],
+    ['Implied value', usd(r.implied_value_usd), 'P25–P75 ' + usd(r.range.p25) + ' – ' + usd(r.range.p75)],
+  ];
+  const compRows = comps.map((c) => '<tr><td>' + esc(c.name) + '</td><td class="num">' + usd(c.tvl) + '</td><td class="num">' + usd(c.mcap) + '</td><td class="num">' + usd(c.model) + '</td><td class="num ' + (c.miss > 0 ? 'pos' : 'neg') + '">' + (c.miss > 0 ? '+' : '') + (c.miss * 100).toFixed(0) + '%</td></tr>').join('');
+  const sens = [
+    ['as recorded', r.tvl_usd, r.change_7d, r.age_days],
+    ['TVL 30% lower', r.tvl_usd * 0.7, r.change_7d, r.age_days],
+    ['7-day growth 0%', r.tvl_usd, 0, r.age_days],
+    ['six more months, no token', r.tvl_usd, r.change_7d, (r.age_days ?? 365) + 180],
+  ].map((s) => {
+    const feat = { tvl: s[1], cat: r.category, chg: s[2], age: s[3] };
+    const v = impliedValue(feat, F.value.fit, F.value.adjustments);
+    const o = launchOdds(designRowFor(feat, F.design), F.odds);
+    const ev = Math.max(1, Math.round(v.implied * o));
+    return '<tr><td>' + s[0] + '</td><td class="num">' + usd(v.implied) + '</td><td class="num">' + Math.round(o * 100) + '%</td><td class="num"><b>' + usd(ev) + '</b></td><td class="num">×' + (ev / r.implied_value_usd).toFixed(2) + '</td></tr>';
+  }).join('');
+  const netRows = [50, 100, 250].map((dep) => '<tr><td>$' + dep + '</td>' + [0.05, 0.1, 0.2].map((sh) => {
+    const p = farmPlan(r, r.implied_value_usd, { deposit: dep, dropShare: sh });
+    return '<td class="num ' + (p.net >= 0 ? 'pos' : 'neg') + '">' + sgn(p.net, 0) + '</td>';
+  }).join('') + '</tr>').join('');
+  dp.innerHTML = '<button class="back" id="backBtn" type="button">← Board, filters kept</button>' +
+    '<div class="d-head"><div><h2>#' + r.rank + ' ' + esc(r.name) + (r.on_watchlist ? '<span class="badge b-wl">WATCHLIST</span>' : '') + '</h2><div class="sub2">' + esc(r.category || '—') + ' · ' + esc(r.chains.join(', ')) + ' · no token for ' + ageFmt(r.age_days) + ' · TVL ' + usd(r.tvl_usd) + ' (' + pct(r.change_7d) + ' in 7 days)</div></div>' +
+    '<div style="text-align:right"><div class="ev">' + usd(r.implied_value_usd) + '</div><div class="sub2">P25–P75 ' + usd(r.range.p25) + ' – ' + usd(r.range.p75) + '</div><div style="margin-top:4px"><span class="badge ' + (r.verdict === 'farm' ? 'b-farm' : 'b-watch') + '">' + r.verdict.toUpperCase() + '</span> <b>' + sgn(r.net_usd, 0) + ' net · ' + sgn(r.net_per_hour_usd) + '/h</b></div></div></div>' +
+    '<div class="d-grid"><div><h3>Value build-up <span class="fn">impliedValue()</span></h3><table class="mini">' + build.map((b) => '<tr><td>' + b[0] + '</td><td class="num"><b>' + b[1] + '</b></td><td class="sub2">' + b[2] + '</td></tr>').join('') + '</table>' +
+    '<h3 style="margin-top:12px">Nearest traded comparables</h3><table class="mini"><tr><th>Token</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">Model, blind</th><th class="num">Miss</th></tr>' + compRows + '</table></div>' +
+    '<div><h3>Farm plan <span class="fn">farmPlan()</span> — ' + plan.hold + ' days on ' + esc(plan.chain) + '</h3><ol class="steps">' + r.farm_steps.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ol>' +
+    '<p class="formula">Budget: $' + plan.cost + ' out of pocket ($' + plan.capital + ' capital + $' + (plan.cost - plan.capital) + ' gas), ' + plan.hours + ' h of work, against an expected drop of ' + usd(plan.valueUser) + ' (' + Math.round(plan.share * 100) + '% of ' + usd(r.implied_value_usd) + ' shared by ~' + plan.farmers.toLocaleString('en-US') + ' farmers). Net ' + sgn(plan.net, 0) + ', ' + sgn(plan.netPerHour, 0) + '/h. The same $' + plan.capital + ' in T-bills at 4.3% would earn $' + plan.tbill.toFixed(2) + ' over the hold.</p>' +
+    '<h3 style="margin-top:12px">Net by deposit × drop share</h3><table class="mini"><tr><th>Deposit</th><th class="num">5% to farmers</th><th class="num">10%</th><th class="num">20%</th></tr>' + netRows + '</table>' +
+    '<h3 style="margin-top:12px">What moves the value <span class="fn">impliedValue()</span> on a changed record</h3><table class="mini"><tr><th>If</th><th class="num">Launch value</th><th class="num">Odds</th><th class="num">Implied</th><th class="num">vs now</th></tr>' + sens + '</table></div></div>';
+  $('backBtn').addEventListener('click', () => { state.slug = null; writeHash(); renderAll(); });
+}
+function renderAll() {
+  renderTabs();
+  renderBoard();
+  renderDetail();
+  if (state.slug) window.scrollTo(0, 0);
+}
+$('q').addEventListener('input', (e) => { state.q = e.target.value; renderBoard(); });
+$('fChain').addEventListener('change', (e) => { state.chain = e.target.value; renderBoard(); });
+$('fCat').addEventListener('change', (e) => { state.cat = e.target.value; renderBoard(); });
+$('fVerdict').addEventListener('change', (e) => { state.verdict = e.target.value; writeHash(); renderBoard(); });
+$('fWatch').addEventListener('change', (e) => { state.watch = e.target.checked; writeHash(); renderBoard(); });
+$('fReset').addEventListener('click', () => { state.q = ''; state.chain = ''; state.cat = ''; state.verdict = ''; state.watch = false; $('q').value = ''; $('fChain').value = ''; $('fCat').value = ''; $('fVerdict').value = ''; $('fWatch').checked = false; writeHash(); renderBoard(); });
+$('foot').textContent = 'Launch Radar v7 · model launch-radar-7 · DefiLlama snapshot ' + R.as_of + ' · the model is refitted in this browser from the sealed snapshot; the integrity strip shows the refit agreeing with board.json.';
+$('q').value = state.q;
+$('fVerdict').value = state.verdict;
+$('fWatch').checked = state.watch;
+renderAll();
+window.RADAR_READY = true;
